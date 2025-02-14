@@ -25,5 +25,5 @@ jobs:
           push: true
           context: .
           file: docker/Dockerfile
-          tags: ghcr.io/Dim145/plex-auto-genres:latest
+          tags: ghcr.io/dim145/plex-auto-genres:latest
 
