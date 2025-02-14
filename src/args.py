@@ -21,7 +21,7 @@ parser.add_argument('--no-progress', help='Do not display the live updating prog
 parser.add_argument('-f', '--force', help='Force proccess on all media (independently of proggress recorded in logs/).', action='store_true')
 parser.add_argument('-y', '--yes', help='Do not prompt.', action='store_true')
 parser.add_argument('--use-keywords', help='Use keywords instead of genres for standard media.', action='store_true')
-parser.add_argument('--use-collection', help='Use collection instead of genres for standard media.', action='store_true')
+parser.add_argument('--use-genres', help='Use collection instead of genres for standard media.', action='store_true')
 parser.add_argument('--clear-genres', help='Clear all genre tags from media before re-adding.', action='store_true')
 
 if len(sys.argv)==1:
@@ -42,7 +42,7 @@ FORCE       = args.force
 NO_PROMPT   = args.yes
 NO_PROGRESS = args.no_progress
 USE_KEYWORDS = args.use_keywords
-USE_COLLECTION = args.use_collection
+USE_GENRES = args.use_genres
 CLEAR_GENRES = args.clear_genres
 
 if args.query:

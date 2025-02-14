@@ -2,7 +2,7 @@ import math
 import os
 from re import sub
 from plexapi.myplex import MyPlexAccount, PlexServer
-from src.args import DRY_RUN, LIBRARY, TYPE, USE_COLLECTION, CLEAR_GENRES
+from src.args import DRY_RUN, LIBRARY, TYPE, CLEAR_GENRES, USE_GENRES
 from src.colors import bcolors
 from src.genres import getGenres
 from src.anime import getAnime
@@ -85,10 +85,10 @@ def generate(plex):
                                 genre = config.replace[genre.lower()]
                             genre = PLEX_COLLECTION_PREFIX + genre
 
-                            if USE_COLLECTION:
-                                media.addCollection(genre)
-                            else:
+                            if USE_GENRES:
                                 media.addGenre(genre)
+                            else:
+                                media.addCollection(genre)
 
                     successfulMedia.append(mediaIdentifier)
             

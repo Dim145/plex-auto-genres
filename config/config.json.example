@@ -36,7 +36,10 @@
                 "setPosters": false,
                 "sortCollections": false,
                 "rateAnime": false,
-                "createRatingCollections": false
+                "createRatingCollections": false,
+                "useKeywords": false,
+                "useGenres": false,
+                "clearGenres": false,
             },
             {
                 "library": "Anime Shows",
@@ -44,7 +47,10 @@
                 "setPosters": false,
                 "sortCollections": false,
                 "rateAnime": false,
-                "createRatingCollections": false
+                "createRatingCollections": false,
+                "useKeywords": false,
+                "useGenres": false,
+                "clearGenres": false,
             },
             {
                 "library": "TV Shows",
@@ -52,7 +58,10 @@
                 "setPosters": false,
                 "sortCollections": false,
                 "rateAnime": false,
-                "createRatingCollections": false
+                "createRatingCollections": false,
+                "useKeywords": false,
+                "useGenres": false,
+                "clearGenres": false,
             },
             {
                 "library": "some other library",
@@ -60,7 +69,10 @@
                 "setPosters": "upload cover art located in /posters?",
                 "sortCollections": "add sort prefix to collections sort title?",
                 "rateAnime": "Will update an anime library with ratings from MyAnimeList (use only on anime librares)",
-                "createRatingCollections": "Will create up to 5 collections (1-5 star system) based on media ratings"
+                "createRatingCollections": "Will create up to 5 collections (1-5 star system) based on media ratings",
+                "useKeywords": "Will create collections based on keywords in tmdb instead of genres",
+                "useGenres": "Will create genres instead of collections",
+                "clearGenres": "Will clear all genres from media before creating new ones"
             }
         ]
     }
