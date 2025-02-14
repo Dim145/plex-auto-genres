@@ -53,6 +53,13 @@ for i, run in enumerate(executions, 1):
 
     argumentList = ['python', 'plex-auto-genres.py', '--library', f'{LIBRARY}', '--type', f'{TYPE}', '--yes', '--no-progress']
 
+    if USE_KEYWORDS:
+        argumentList.append('--use-keywords')
+    if USE_GENRES:
+        argumentList.append('--use-genres')
+    if CLEAR_GENRES:
+        argumentList.append('--clear-genres')
+
     printWithTimestamp(f'\t> Checking for new media and fetching genres...')
     with Popen(argumentList, stdout=PIPE, stderr=STDOUT) as p, open(LOGFILE, 'ab') as file:
         file.write(str.encode(f'--- Execution {getTimestamp()} ---\n'))
@@ -72,15 +79,6 @@ for i, run in enumerate(executions, 1):
 
     if RATING_COLS:
         postProcess.append('--create-rating-collections')
-
-    if USE_KEYWORDS:
-        postProcess.append('--use-keywords')
-
-    if USE_GENRES:
-        postProcess.append('--use-genres')
-
-    if CLEAR_GENRES:
-        postProcess.append('--clear-genres')
 
     if postProcess:
         for command in postProcess:
