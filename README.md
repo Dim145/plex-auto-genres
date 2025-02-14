@@ -1,7 +1,7 @@
 # Plex Auto Genres
 ![](https://img.shields.io/docker/cloud/build/shaneisrael/plex-auto-genres)
 
-Plex Auto Genres is a simple script that will add genre collection tags to your media making it much easier to search for genre specific content
+Plex Auto Genres is a simple script that will add genre collection or genres tags to your media making it much easier to search for genre specific content
 
 1. [Requirements](#requirements)
 2. [Optimal Setup](#optimal)
@@ -78,6 +78,10 @@ optional arguments:
   --no-progress         Do not display the live updating progress bar
   -f, --force           Force proccess on all media (independently of proggress recorded in logs/).
   -y, --yes
+  --use-keywords        Use keywords instead of genres for standard media.
+  --use-genres          Use collection instead of genres for standard media.
+  --clear-genres        Clear all genre tags from media before re-adding.
+
 
 examples: 
 python plex-auto-genres.py --library "Anime Movies" --type anime
