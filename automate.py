@@ -7,6 +7,8 @@ import datetime
 import numpy as np
 from timeit import default_timer as timer
 from subprocess import Popen, PIPE, STDOUT
+
+from src.args import USE_KEYWORDS, USE_COLLECTION, CLEAR_GENRES
 from src.colors import bcolors
 
 WAIT_TIME=45
@@ -44,6 +46,9 @@ for i, run in enumerate(executions, 1):
     SORT_COLLECTIONS = run['sortCollections']
     RATE_ANIME       = run['rateAnime']
     RATING_COLS      = run['createRatingCollections']
+    USE_KEYWORDS     = run['useKeywords']
+    USE_COLLECTION   = run['useCollection']
+    CLEAR_GENRES     = run['clearGenres']
 
     start = timer()
     printWithTimestamp(f'{bcolors.OKCYAN}Running [{i}/{len(executions)}] -- library={LIBRARY}, type={TYPE}{bcolors.ENDC}')
@@ -69,6 +74,15 @@ for i, run in enumerate(executions, 1):
 
     if RATING_COLS:
         postProcess.append('--create-rating-collections')
+
+    if USE_KEYWORDS:
+        postProcess.append('--use-keywords')
+
+    if USE_COLLECTION:
+        postProcess.append('--use-collection')
+
+    if CLEAR_GENRES:
+        postProcess.append('--clear-genres')
 
     if postProcess:
         for command in postProcess:

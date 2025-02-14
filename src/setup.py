@@ -3,7 +3,7 @@ import sys
 import signal
 from re import search
 from dotenv import load_dotenv
-from tmdbv3api import TV, Movie, TMDb
+from tmdbv3api import TV, Movie, TMDb, Search
 from src.colors import bcolors
 
 load_dotenv()
@@ -19,6 +19,7 @@ TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 tmdb = TMDb()
 movie = Movie()
 tv = TV()
+tmdb_search = Search()
 
 signal.signal(signal.SIGINT, signal.default_int_handler)
 
@@ -26,7 +27,7 @@ tmdb.api_key = TMDB_API_KEY
 
 def validateDotEnv(mediaType):
     if not os.path.isfile('.env') and not (PLEX_USERNAME or PLEX_PASSWORD or PLEX_SERVER_NAME) and not (PLEX_TOKEN or PLEX_BASE_URL):
-        print(bcolors.FAIL + 'No .env file detected. Please locate the .env.example file and copy' +
+        print(bcolors.FAIL + 'No .env file detected. Please locate the .env file and copy' +
             ' the contents into a new file named .env placed next to this script.' + bcolors.ENDC)
         sys.exit(1)
 

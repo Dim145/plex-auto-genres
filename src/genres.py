@@ -1,8 +1,11 @@
 #pylint: disable=no-member
+import os
 from logging import error
 import re
 from time import sleep
-from src.setup import movie, tv
+
+from src.args import USE_KEYWORDS
+from src.setup import movie, tv, tmdb_search
 from src.anime import getAnime, getAnimeDetails
 
 
@@ -22,18 +25,19 @@ def getAnimeGenres(title):
 def getStandardGenres(title, mediaType):
     try:
         db = movie if re.search('^\S*movie$', mediaType) else tv
+        search_func = tmdb_search.movies if re.search('^\S*movie$', mediaType) else tmdb_search.tv_shows
 
         sleep(0.5)
 
-        query = db.search(title)
+        query = search_func(title, adult=True)
         if len(query) == 0:
             return []
 
         sleep(0.5)
 
-        details = db.details(query[0].id)
+        response = db.keywords(query[0].id).results if USE_KEYWORDS else db.details(query[0].id).genres
 
-        genres = [ y[0] for y in [x['name'].split(' & ') for x in details.genres] ]
+        genres = [ y[0] for y in [x['name'].split(' & ') for x in response] ]
 
         return genres
 
