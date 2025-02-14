@@ -74,7 +74,7 @@ def generate(plex):
 
                 else:
                     if not DRY_RUN:
-                        if CLEAR_GENRES:
+                        if CLEAR_GENRES and USE_GENRES:
                             media.editTags('genre', [], locked=True)
 
                         updateCount += 1
