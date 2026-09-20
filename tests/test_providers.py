@@ -372,7 +372,7 @@ async def test_a_429_without_retry_after_pauses_for_a_real_stretch():
         await provider.fetch_by_id(
             ExternalId("mal", "1"), LookupRequest("x", None, MediaType.ANIME)
         )
-    assert caught.value.retry_after == DEFAULT_COOLDOWN_S
+    assert caught.value.retry_after == pytest.approx(DEFAULT_COOLDOWN_S, abs=0.05)
 
 
 async def test_backoff_never_retries_instantly(monkeypatch):
@@ -399,7 +399,8 @@ async def test_a_good_response_unwinds_the_cooldown():
     await limiter.penalise(0.0)
     await limiter.penalise(0.0)       # two refusals in a row
     await provider.fetch_by_id(ExternalId("mal", "1"), LookupRequest("x", None, MediaType.ANIME))
-    assert await limiter.penalise(1.0) == 2.0, "the next refusal starts one step lower"
+    # The pause is measured against a monotonic clock, so compare loosely.
+    assert await limiter.penalise(1.0) == pytest.approx(2.0, abs=0.05), "one step lower"
 
 
 @respx.mock
