@@ -11,13 +11,14 @@ from typing import Any, TypeVar
 
 import httpx
 
+from .. import __version__
 from ..errors import ProviderAuthError, ProviderError, ProviderNotFound, ProviderRateLimited
 from ..models import Candidate, ExternalId, MediaType, ProviderResult
 from ..ratelimit import CompositeLimiter
 
 log = logging.getLogger(__name__)
 
-USER_AGENT = "plex-auto-genres/2.0"
+USER_AGENT = f"plex-auto-genres/{__version__}"
 
 #: Pause after a 429 that came with no Retry-After header. Providers that
 #: police a rolling minute keep refusing for the rest of it, so the pause has
