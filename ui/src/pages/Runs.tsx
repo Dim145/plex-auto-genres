@@ -73,6 +73,7 @@ export default function Runs() {
                         <>
                           <span>{int(run.report.written)} written</span>
                           {run.report.failed > 0 && <span className="tone-fail"> · {int(run.report.failed)} failed</span>}
+                          {(run.report.deferred ?? 0) > 0 && <span className="tone-amber"> · {int(run.report.deferred)} deferred</span>}
                           {run.report.error && <span className="tone-fail" title={run.report.error}> · aborted</span>}
                         </>
                       ) : (

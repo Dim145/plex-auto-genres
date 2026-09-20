@@ -6,7 +6,11 @@ import httpx
 import respx
 
 from plex_auto_genres.config import AppConfig
-from plex_auto_genres.pipeline import Pipeline, rating_bucket
+from plex_auto_genres.pipeline import GIVE_UP_AFTER, Pipeline, rating_bucket
+from plex_auto_genres import providers as providers_module
+from plex_auto_genres.providers import UNHEALTHY_AFTER
+from plex_auto_genres.providers.base import HttpTransport
+from plex_auto_genres.ratelimit import LimitSpec
 from plex_auto_genres.store import Store
 
 from .conftest import FakePlexItem
@@ -50,15 +54,33 @@ class FakeServer:
         return next(i for i in self._section.all() if i.ratingKey == int(rating_key))
 
 
-def make_config(**library_kwargs) -> AppConfig:
+def make_config(concurrency: int = 4, tmdb_key: str | None = None, **library_kwargs) -> AppConfig:
     base = {"library": "Animes", "type": "anime", "useGenres": True}
     base.update(library_kwargs)
     return AppConfig.model_validate({
         "version": 2,
         "defaults": {"anime": {"ignore": ["Kids"], "replace": {"sci-fi": "science fiction"}}},
         "libraries": [base],
-        "providers": {"concurrency": 4},
+        "providers": {"concurrency": concurrency, "tmdb_api_key": tmdb_key},
     })
+
+
+def unmetered(monkeypatch, *names: str) -> None:
+    """Take a provider's published pacing out of a test that is not about it."""
+    for name in names:
+        monkeypatch.setitem(providers_module._LIMITS, name, LimitSpec(((1000, 1.0),)))
+
+
+async def _no_backoff(_attempt: int) -> None:
+    """Skip the real 5xx wait; this test is about which source gets asked."""
+
+
+def anilist_ok(genres=("Action", "Adventure")) -> httpx.Response:
+    return httpx.Response(200, json={"data": {"Media": {
+        "id": 1, "idMal": 1, "title": {"romaji": "Anime"}, "genres": list(genres),
+        "tags": [], "averageScore": 80, "startDate": {"year": 1998},
+        "siteUrl": "https://anilist.co/anime/1",
+    }}})
 
 
 def jikan_ok(mal_id=1, genres=("Action", "Kids", "Sci-Fi"), score=8.0):
@@ -452,3 +474,167 @@ async def test_an_anime_library_can_fall_back_to_tmdb(store: Store):
     assert (report.written, report.failed) == (1, 0)
     assert handle.last_tags == ["Animation", "Sci-Fi", "Fantasy"]
     assert store.get_state("Animes", "mal://1").provider == "tmdb"
+
+
+# -- when a source stops answering ----------------------------------------
+
+
+@respx.mock
+async def test_a_rate_limited_title_is_deferred_not_cached_as_a_failure(store: Store):
+    """The v2.0 bug behind a big anime library coming back with 268 failures.
+
+    Every source refusing to answer used to be raised as "not found", which
+    cached a failure row and hid the title behind an hour of backoff. It is a
+    missing answer, not an answer, so nothing is written down.
+    """
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d+").mock(
+        return_value=httpx.Response(429, headers={"Retry-After": "0"})
+    )
+    config = make_config()
+    server = FakeServer([guid_item()])
+
+    report = await Pipeline(config, store, server).tag_library(config.libraries[0])
+
+    assert (report.deferred, report.failed, report.written) == (1, 0, 0)
+    assert store.get_state("Animes", "mal://1") is None, "nothing cached"
+
+    # ... so the next run picks it straight back up instead of skipping it.
+    again = await Pipeline(config, store, server).tag_library(config.libraries[0])
+    assert again.deferred == 1 and again.skipped == 0
+
+
+@respx.mock
+async def test_a_run_gives_up_once_nothing_is_answering(store: Store, monkeypatch):
+    """Better to stop and say so than to grind a whole library against a dead API."""
+    unmetered(monkeypatch, "jikan")
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d+").mock(
+        return_value=httpx.Response(429, headers={"Retry-After": "0"})
+    )
+    items = [guid_item(i, f"Title {i}") for i in range(1, GIVE_UP_AFTER + 21)]
+    config = make_config(concurrency=1)
+
+    report = await Pipeline(config, store, FakeServer(items)).tag_library(config.libraries[0])
+
+    assert report.error and "next run" in report.error
+    assert report.deferred >= GIVE_UP_AFTER
+    assert not store.states_for_library("Animes"), "and left no trace to skip next time"
+    # Five titles pay three attempts each to establish that the source is
+    # down. After that it is left alone: no amount of library is worth more
+    # requests to an API that is refusing every one of them.
+    assert report.provider_requests == UNHEALTHY_AFTER * 3
+
+
+@respx.mock
+async def test_a_source_that_stops_answering_stands_down_for_the_fallback(
+    store: Store, monkeypatch
+):
+    """Once Jikan is clearly down, the rest of the library goes straight to AniList."""
+    unmetered(monkeypatch, "jikan", "anilist")
+    monkeypatch.setattr(HttpTransport, "_sleep_backoff", staticmethod(_no_backoff))
+    jikan = respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d+").mock(
+        return_value=httpx.Response(504)
+    )
+    respx.post("https://graphql.anilist.co").mock(return_value=anilist_ok())
+
+    items = [guid_item(i, f"Title {i}") for i in range(1, 11)]
+    config = make_config(providers=["jikan", "anilist"], concurrency=1)
+
+    report = await Pipeline(config, store, FakeServer(items)).tag_library(config.libraries[0])
+
+    assert report.written == 10 and report.deferred == 0
+    # Five titles pay for the discovery, at three attempts each; the other
+    # five skip Jikan entirely instead of spending 3 more calls apiece.
+    assert jikan.call_count == UNHEALTHY_AFTER * 3
+
+
+@respx.mock
+async def test_a_pinned_binding_is_tried_before_the_configured_order(store: Store):
+    """A binding names an id scheme, so the provider that answers it goes first.
+
+    Sorting by provider *name* against a scheme left the configured order
+    untouched, so a pinned TMDB id was reached only if MyAnimeList happened to
+    miss first.
+    """
+    jikan = respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime\b")
+    respx.get("https://api.themoviedb.org/3/tv/7").mock(
+        return_value=httpx.Response(200, json={
+            "id": 7, "name": "Anime", "genres": [{"name": "Animation"}],
+        })
+    )
+    handle = guid_item()
+    store.set_binding("Animes", "mal://1", "tmdb", "7")
+    config = make_config(tmdb_key="k", providers=["jikan", "tmdb"], clearGenres=True)
+
+    report = await Pipeline(config, store, FakeServer([handle])).tag_library(config.libraries[0])
+
+    assert report.written == 1 and handle.last_tags == ["Animation"]
+    assert not jikan.called, "the pinned source answered, so nothing else was asked"
+
+
+@respx.mock
+async def test_a_pinned_binding_survives_its_source_standing_down(store: Store, monkeypatch):
+    """Standing a source down must not quietly override a hand-picked match."""
+    unmetered(monkeypatch, "jikan", "anilist")
+    monkeypatch.setattr(HttpTransport, "_sleep_backoff", staticmethod(_no_backoff))
+    pinned = respx.get("https://api.jikan.moe/v4/anime/777").mock(return_value=jikan_ok(777))
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d+").mock(
+        return_value=httpx.Response(504)
+    )
+    respx.post("https://graphql.anilist.co").mock(return_value=anilist_ok())
+
+    items = [guid_item(i, f"Title {i}") for i in range(1, 11)]
+    store.set_binding("Animes", "mal://10", "mal", "777")   # the last one to be handled
+    config = make_config(providers=["jikan", "anilist"], concurrency=1)
+
+    report = await Pipeline(config, store, FakeServer(items)).tag_library(config.libraries[0])
+
+    assert report.written == 10
+    assert pinned.called, "the pinned source is still asked when its turn comes"
+
+
+@respx.mock
+async def test_a_source_standing_down_does_not_turn_real_misses_into_deferrals(
+    store: Store, monkeypatch
+):
+    """A verdict from any source settles the title, even while another is down.
+
+    Treating "somebody was silent" as enough to defer meant that, for the whole
+    of a stand-down, a title AniList genuinely had no record of was never
+    cached -- and counted toward giving up on the run.
+    """
+    unmetered(monkeypatch, "jikan", "anilist")
+    monkeypatch.setattr(HttpTransport, "_sleep_backoff", staticmethod(_no_backoff))
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d+").mock(
+        return_value=httpx.Response(504)
+    )
+    respx.post("https://graphql.anilist.co").mock(return_value=httpx.Response(404))
+
+    items = [guid_item(i, f"Title {i}") for i in range(1, 11)]
+    config = make_config(providers=["jikan", "anilist"], concurrency=1)
+
+    report = await Pipeline(config, store, FakeServer(items)).tag_library(config.libraries[0])
+
+    assert (report.failed, report.deferred) == (10, 0)
+    assert report.error is None, "a library of genuine misses is not an outage"
+    assert store.get_state("Animes", "mal://10").status == "failed"
+
+
+@respx.mock
+async def test_a_half_healthy_library_is_not_given_up_on(store: Store, monkeypatch):
+    """Deferrals return at once while writes queue for Plex, so completion
+    order bunches them together. Counting a run of them abandoned a library
+    that was resolving half its titles perfectly well."""
+    unmetered(monkeypatch, "jikan")
+    monkeypatch.setattr(HttpTransport, "_sleep_backoff", staticmethod(_no_backoff))
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d*[13579]$").mock(
+        return_value=httpx.Response(504)
+    )
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d+").mock(return_value=jikan_ok())
+
+    items = [guid_item(i, f"Title {i}") for i in range(1, 61)]
+    config = make_config()
+
+    report = await Pipeline(config, store, FakeServer(items)).tag_library(config.libraries[0])
+
+    assert report.error is None, "half the library was resolving fine"
+    assert report.written > 0 and report.written + report.deferred == len(items)

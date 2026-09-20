@@ -2,17 +2,31 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import pytest
 import respx
 
 from plex_auto_genres.errors import ProviderNotFound, ProviderRateLimited
 from plex_auto_genres.models import ExternalId, MediaType
+from plex_auto_genres.providers import UNHEALTHY_AFTER, ProviderPool
 from plex_auto_genres.providers.anilist import AniListProvider
-from plex_auto_genres.providers.base import HttpTransport, LookupRequest, pick_best
+from plex_auto_genres.providers.base import (
+    DEFAULT_COOLDOWN_S,
+    HttpTransport,
+    LookupRequest,
+    pick_best,
+)
 from plex_auto_genres.providers.jikan import JikanProvider, clean_anime_title
 from plex_auto_genres.providers.tmdb import TmdbProvider, split_compound_genres
 from plex_auto_genres.ratelimit import LimitSpec
+
+
+def jikan_payload(mal_id: int = 1) -> httpx.Response:
+    return httpx.Response(200, json={"data": {
+        "mal_id": mal_id, "title": "Anime", "score": 8.0, "genres": [{"name": "Action"}],
+    }})
 
 
 def transport(name="test", attempts=2) -> HttpTransport:
@@ -344,3 +358,79 @@ async def test_tmdb_searches_the_tv_catalogue_for_an_anime_library():
     # TMDB's taxonomy, not MAL's -- and the compound genre is still split.
     assert result.genres == ["Animation", "Action", "Adventure"]
     assert result.provider_id == "42"
+
+
+# -- a public API having a bad day -----------------------------------------
+
+
+@respx.mock
+async def test_a_429_without_retry_after_pauses_for_a_real_stretch():
+    """v2.0 waited two seconds -- well inside a provider's rolling minute."""
+    respx.get("https://api.jikan.moe/v4/anime/1").mock(return_value=httpx.Response(429))
+    provider = JikanProvider(transport("jikan", attempts=1))
+    with pytest.raises(ProviderRateLimited) as caught:
+        await provider.fetch_by_id(
+            ExternalId("mal", "1"), LookupRequest("x", None, MediaType.ANIME)
+        )
+    assert caught.value.retry_after == DEFAULT_COOLDOWN_S
+
+
+async def test_backoff_never_retries_instantly(monkeypatch):
+    """Full jitter from zero let a worker hit a timing-out gateway again at once."""
+    waits: list[float] = []
+
+    async def record(seconds: float) -> None:
+        waits.append(seconds)
+
+    monkeypatch.setattr(asyncio, "sleep", record)
+    for attempt, (low, high) in {1: (0.5, 2.0), 2: (1.0, 4.0), 3: (2.0, 8.0)}.items():
+        waits.clear()
+        await HttpTransport._sleep_backoff(attempt)   # noqa: SLF001
+        assert low <= waits[0] <= high
+
+
+@respx.mock
+async def test_a_good_response_unwinds_the_cooldown():
+    limiter = LimitSpec(((1000, 1.0),)).build()
+    respx.get("https://api.jikan.moe/v4/anime/1").mock(return_value=jikan_payload())
+    provider = JikanProvider(
+        HttpTransport(httpx.AsyncClient(), limiter, max_attempts=1, name="jikan")
+    )
+    await limiter.penalise(0.0)
+    await limiter.penalise(0.0)       # two refusals in a row
+    await provider.fetch_by_id(ExternalId("mal", "1"), LookupRequest("x", None, MediaType.ANIME))
+    assert await limiter.penalise(1.0) == 2.0, "the next refusal starts one step lower"
+
+
+@respx.mock
+async def test_a_404_also_unwinds_the_cooldown():
+    """A "no such title" is an answer, and proof the source is up."""
+    limiter = LimitSpec(((1000, 1.0),)).build()
+    respx.get("https://api.jikan.moe/v4/anime/9").mock(return_value=httpx.Response(404))
+    provider = JikanProvider(
+        HttpTransport(httpx.AsyncClient(), limiter, max_attempts=1, name="jikan")
+    )
+    await limiter.penalise(0.0)
+    await limiter.penalise(0.0)       # two refusals in a row
+    with pytest.raises(ProviderNotFound):
+        await provider.fetch_by_id(
+            ExternalId("mal", "9"), LookupRequest("x", None, MediaType.ANIME)
+        )
+    assert await limiter.penalise(1.0) == pytest.approx(2.0, abs=0.05)
+
+
+async def test_a_standing_down_source_ignores_what_was_already_in_flight():
+    """A wave of in-flight failures used to stack several stand-downs at once,
+    so the cool-off was a function of `concurrency` rather than of the outage:
+    at the highest setting the first wave jumped straight to five minutes."""
+    provider = JikanProvider(transport("jikan"))
+    async with httpx.AsyncClient() as client:
+        pool = ProviderPool([provider], client)
+        for _ in range(UNHEALTHY_AFTER - 1):
+            assert pool.note_unreachable(provider, "HTTP 504") is False
+        assert pool.note_unreachable(provider, "HTTP 504") is True
+        assert pool.usable([provider]) == []
+
+        for _ in range(UNHEALTHY_AFTER * 3):
+            assert pool.note_unreachable(provider, "HTTP 504") is False
+        assert pool._health["jikan"].stand_downs == 1   # noqa: SLF001

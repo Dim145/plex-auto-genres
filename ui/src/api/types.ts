@@ -114,6 +114,11 @@ export interface RunReport {
   unchanged: number;
   skipped: number;
   failed: number;
+  /**
+   * Titles no source could answer for. Left pending, not cached as failures.
+   * Optional: runs recorded before this existed have no such field.
+   */
+  deferred?: number;
   total: number;
   plex_requests: number;
   provider_requests: number;
@@ -182,6 +187,7 @@ export interface JobProgress {
   written: number;
   unchanged: number;
   failed: number;
+  deferred: number;
   title: string | null;
 }
 
@@ -223,7 +229,7 @@ export type JobEvent =
   | { event: "snapshot"; data: JobView }
   | { event: "status"; data: JobView }
   | { event: "begin"; data: { job_id: string; library: string; action: string; run_id: string; total: number; pending: number } }
-  | { event: "item"; data: { job_id: string; run_id: string; done: number; pending: number; written: number; unchanged: number; failed: number; title: string; status: string; error: string | null } }
+  | { event: "item"; data: { job_id: string; run_id: string; done: number; pending: number; written: number; unchanged: number; failed: number; deferred: number; title: string; status: string; error: string | null } }
   | { event: "report"; data: { job_id: string; run_id: string; report: RunReport } }
   | { event: "end"; data: { job_id: string; status: JobStatus; error: string | null; run_ids: string[]; reports: RunReport[] } };
 

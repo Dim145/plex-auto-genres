@@ -519,6 +519,52 @@ gitleaks, pip-audit, pnpm audit). What it changed:
   every frame rather than on scroll events only, and anchors clear the sticky strip and
   stop fighting the user's own scrolling.
 
+### Standing up to a source having a bad day — done
+
+Reported from a real run: a large anime library came back with 268 failures, alternating
+`jikan: rate limited` and `jikan: HTTP 504`. Four separate faults, all fixed:
+
+- **The limiter handed out a whole window at once.** A 60/min bucket stocked with 60
+  tokens delivers the entire minute in its first seconds, which is precisely the spike a
+  provider's own rolling-window limiter refuses. A window longer than a second now
+  stocks five seconds' worth, so the traffic is paced rather than bursty.
+- **A refusal was answered with a two-second pause.** A provider policing a rolling
+  minute goes on refusing for the rest of it, so each of the item's three attempts was
+  spent inside the same blocked window. The pause now honours `Retry-After`, starts at
+  five seconds otherwise, and doubles while refusals keep landing in the shadow of the
+  last one — capped, and unwound by every request that gets through. Once a pause
+  reaches twenty seconds the title is handed back rather than burning attempts.
+- **Gateway errors were retried almost immediately.** Full jitter measured from zero
+  let a worker hit a timing-out gateway again before it had a moment. The backoff now
+  has a floor as well as a ceiling.
+- **Worst of all, a source being down was cached as a verdict.** Whatever the reason,
+  the fallback loop raised `ProviderNotFound`, so the item was written to the cache as
+  failed and hidden behind an hour of retry backoff. "No source answered" is the absence
+  of an answer, not an answer: it is now `ProviderUnavailable`, reported as **deferred**,
+  and nothing is written down. The next run picks the title straight back up.
+
+Two behaviours follow from that distinction. A provider that keeps failing is stood down
+for the rest of a cool-off, so the remaining titles go straight to the next source
+instead of each paying its retries; and once twenty-five titles have been deferred with
+not one answer from any source, the run stops early with a note saying so, rather than
+grinding a library of thousands against a dead API. The console counts deferrals
+separately from failures everywhere they appear, and the failures panel explains that
+they are still pending.
+
+Three things the first cut of this got wrong, all found in review before it shipped:
+
+- **A title is deferred only when nobody gave a verdict.** Treating "some source was
+  silent" as enough meant that, for the whole of a stand-down, a title another source
+  genuinely had no record of was never cached, and counted toward giving up.
+- **Giving up is not a matter of consecutive deferrals.** A deferral returns at once
+  while a written item still waits on a Plex round trip in another thread, so completion
+  order bunches deferrals together and a library resolving half its titles looked dead.
+  The pool is asked instead, because it counts answers as they arrive.
+- **An item retrying is one incident, not three.** Each of a title's three attempts
+  climbed the cooldown ladder by itself, so a single hiccup was priced like a sustained
+  outage; and a wave of in-flight failures stacked several stand-downs at once, making
+  the cool-off a function of `providers.concurrency` rather than of the outage.
+
 ### Next
 
 Decide where secrets should live if they are ever to be edited from the UI — the

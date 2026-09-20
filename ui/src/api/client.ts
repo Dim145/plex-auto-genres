@@ -284,6 +284,7 @@ export function useJobEvents(jobId: string | null | undefined): LiveJob {
                 written: 0,
                 unchanged: 0,
                 failed: 0,
+                deferred: 0,
                 title: null,
               },
             };
@@ -297,11 +298,14 @@ export function useJobEvents(jobId: string | null | undefined): LiveJob {
                     written: message.data.written,
                     unchanged: message.data.unchanged,
                     failed: message.data.failed,
+                    deferred: message.data.deferred ?? 0,
                     title: message.data.title,
                   }
                 : prev.progress,
+              // A deferred title counts here too: during an outage it is the
+              // only sign of what is going on.
               lastError:
-                message.data.status === "failed"
+                message.data.status === "failed" || message.data.status === "deferred"
                   ? { title: message.data.title, error: message.data.error ?? "failed" }
                   : prev.lastError,
             };

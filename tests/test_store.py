@@ -197,6 +197,11 @@ def test_run_status_ladder(store: Store):
     assert finished(error="Plex went away") == "failed"
     assert finished(written=1, error="Plex went away") == "partial"
     assert finished(cancelled=True, written=1) == "cancelled"
+    # A source that stopped answering: the run stopped early, which sets the
+    # same error field a hard abort does, but nothing actually broke.
+    assert finished(deferred=9) == "partial"
+    assert finished(deferred=9, error="Stopped after 25 titles") == "partial"
+    assert finished(deferred=9, failed=2) == "failed"
     undone = store.start_run("L", "genres", dry_run=False)
     store.finish_run(RunReport(run_id=undone, library="L", action="genres", written=1))
     store.mark_undone(undone)
@@ -241,3 +246,19 @@ def test_older_databases_gain_the_new_columns(tmp_path):
         assert state.score == 7.5 and state.source == "guid"
         reopened.add_snapshot("r", "L", 1, "t", "genre", [], ["A"], locked_before=False)
         assert reopened.snapshots_for("r")[0]["locked_before"] == 0
+
+
+def test_clear_failures_leaves_the_successes_alone(store: Store):
+    """`failures --retry` used to wipe the library, re-tagging everything."""
+    store.record_success("A", "k1", fingerprint="f", title="Good", year=2000,
+                         rating_key=1, genres=["Action"], provider="jikan",
+                         provider_id="1", score=8.0, source="guid")
+    store.record_failure("A", "k2", fingerprint="f", title="Bad", year=2001,
+                         rating_key=2, error="jikan: rate limited")
+    store.record_failure("B", "k3", fingerprint="f", title="Other", year=2002,
+                         rating_key=3, error="jikan: rate limited")
+
+    assert store.clear_failures("A") == 1
+    assert store.get_state("A", "k1") is not None, "the successful entry survives"
+    assert store.get_state("A", "k2") is None
+    assert store.get_state("B", "k3") is not None, "another library is untouched"

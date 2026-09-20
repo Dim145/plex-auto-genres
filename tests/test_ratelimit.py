@@ -7,7 +7,15 @@ import time
 
 import pytest
 
-from plex_auto_genres.ratelimit import CompositeLimiter, LimitSpec, TokenBucket
+from plex_auto_genres.ratelimit import (
+    JIKAN_LIMITS,
+    MAX_PENALTY_S,
+    PENALTY_ESCALATION_MAX,
+    CompositeLimiter,
+    LimitSpec,
+    TokenBucket,
+    _burst_for,
+)
 
 
 async def test_burst_is_allowed_immediately():
@@ -61,3 +69,68 @@ async def test_concurrency_is_actually_concurrent():
     await asyncio.gather(*(call() for _ in range(10)))
     elapsed = time.monotonic() - start
     assert elapsed < 0.5, f"expected overlap, took {elapsed:.2f}s"
+
+
+async def test_a_long_window_is_not_handed_out_as_one_burst():
+    """Jikan's 60/min must not arrive as 60 requests in the first few seconds.
+
+    That spike is what a provider's own rolling-window limiter sees, and what
+    came back as a library full of "rate limited" failures.
+    """
+    minute = LimitSpec(((60, 60.0),)).build()
+    await asyncio.gather(*(minute.acquire() for _ in range(5)))   # the whole stock
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(minute.acquire(), timeout=0.3)
+    assert JIKAN_LIMITS.windows == ((3, 1.0), (60, 60.0))
+
+
+def test_burst_for_scales_with_the_window():
+    assert _burst_for(40, 1.0) == 40        # a per-second limit is the burst
+    assert _burst_for(60, 60.0) == 5.0      # five seconds' worth of a minute
+    assert _burst_for(90, 60.0) == 7.5
+    assert _burst_for(2, 60.0) == 1.0       # never less than one request
+
+
+async def test_repeated_refusals_escalate_the_pause():
+    limiter = LimitSpec(((100, 1.0),)).build()
+    first = await limiter.penalise(1.0)
+    second = await limiter.penalise(1.0)
+    third = await limiter.penalise(1.0)
+    assert [first, second, third] == pytest.approx([1.0, 2.0, 4.0], abs=0.05)
+
+
+async def test_escalation_is_capped():
+    limiter = LimitSpec(((100, 1.0),)).build()
+    pauses = [await limiter.penalise(1.0) for _ in range(8)]
+    assert max(pauses) == pytest.approx(PENALTY_ESCALATION_MAX, abs=0.05)
+
+
+async def test_a_request_getting_through_unwinds_the_escalation():
+    limiter = LimitSpec(((100, 1.0),)).build()
+    await limiter.penalise(1.0)
+    await limiter.penalise(1.0)          # streak 2
+    limiter.note_success()               # back down to 1
+    assert await limiter.penalise(1.0) == pytest.approx(2.0, abs=0.05)
+
+
+async def test_a_quiet_spell_resets_the_escalation():
+    limiter = LimitSpec(((100, 1.0),)).build()
+    assert await limiter.penalise(2.0) == pytest.approx(2.0, abs=0.05)
+    # Far enough past the cooldown's shadow that this counts as a new incident.
+    limiter._streak_until = time.monotonic() - 1.0       # noqa: SLF001
+    limiter._penalty_until = time.monotonic() - 1.0      # noqa: SLF001
+    assert await limiter.penalise(2.0) == pytest.approx(2.0, abs=0.05)
+
+
+async def test_retrying_one_refusal_does_not_climb_the_ladder():
+    """Three attempts on one title are one incident, not three."""
+    limiter = LimitSpec(((100, 1.0),)).build()
+    first = await limiter.penalise(1.0)
+    retry = await limiter.penalise(1.0, escalate=False)
+    assert [first, retry] == pytest.approx([1.0, 1.0], abs=0.05)
+    assert await limiter.penalise(1.0) == pytest.approx(2.0, abs=0.05), "a new one still climbs"
+
+
+async def test_a_cooldown_is_never_longer_than_the_ceiling():
+    limiter = LimitSpec(((100, 1.0),)).build()
+    assert await limiter.penalise(3600.0) == pytest.approx(MAX_PENALTY_S, abs=0.05)

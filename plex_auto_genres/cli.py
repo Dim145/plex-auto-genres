@@ -266,7 +266,8 @@ async def cmd_run(args, config: AppConfig, store: Store, style: Style) -> int:
 
     if args.json:
         print(json.dumps([r.as_dict() for r in reports], indent=2, ensure_ascii=False))
-    return 1 if any(r.failed for r in reports if r.action in ("genres", "collections")) else 0
+    unfinished = [r for r in reports if r.action in ("genres", "collections")]
+    return 1 if any(r.failed or r.deferred for r in unfinished) else 0
 
 
 async def cmd_query(args, config: AppConfig, style: Style) -> int:
@@ -406,6 +407,8 @@ def cmd_runs(args, store: Store, style: Style, as_json: bool) -> int:
         else:
             result = (f"{report.get('written', 0)} written, "
                       f"{report.get('failed', 0)} failed")
+            if report.get("deferred", 0):
+                result += f", {report['deferred']} deferred"
             if report.get("error"):
                 result += style.red(f"  {report['error']}")
         flag = style.dim(" (dry)") if row["dry_run"] else ""
@@ -433,8 +436,11 @@ def cmd_failures(args, store: Store, style: Style, as_json: bool) -> int:
         f"plex-auto-genres bind '{args.library}' '<title>' tmdb <id>"
     ))
     if args.retry:
-        store.clear_library(args.library)
-        print(style.green("Cleared the cache for this library; the next run retries everything."))
+        cleared = store.clear_failures(args.library)
+        print(style.green(
+            f"Cleared {cleared} failed entries; the next run retries them. "
+            "Everything that already succeeded is untouched."
+        ))
     return 0
 
 

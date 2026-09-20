@@ -22,7 +22,11 @@ export function RunTape({ runs }: { runs: RunView[] }) {
         const tone = toneForRun(run.status);
         const written = run.report?.written ?? 0;
         const failed = run.report?.failed ?? 0;
-        const title = `${run.library} · ${run.action} · ${run.status} · ${written} written, ${failed} failed · ${dateTime(run.started_at)}`;
+        const deferred = run.report?.deferred ?? 0;
+        const tally = [`${written} written`, `${failed} failed`]
+          .concat(deferred ? [`${deferred} deferred`] : [])
+          .join(", ");
+        const title = `${run.library} · ${run.action} · ${run.status} · ${tally} · ${dateTime(run.started_at)}`;
         return (
           <Link
             key={run.run_id}

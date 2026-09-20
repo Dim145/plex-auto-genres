@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import logging
+import time
+from dataclasses import dataclass
+
 import httpx
 
 from ..config import ProviderSettings
@@ -13,6 +17,16 @@ from .anilist import AniListProvider
 from .base import HttpTransport, LookupRequest, Provider, USER_AGENT
 from .jikan import JikanProvider
 from .tmdb import TmdbProvider
+
+log = logging.getLogger(__name__)
+
+#: Consecutive unreachable answers before a provider is stood down for a
+#: while. A public API having a bad minute should not cost every remaining
+#: title its full retry budget before the next source gets a turn.
+UNHEALTHY_AFTER = 5
+#: First stand-down, doubling with each repeat up to :data:`MAX_COOLDOWN_S`.
+COOLDOWN_S = 30.0
+MAX_COOLDOWN_S = 300.0
 
 __all__ = [
     "GUID_SCHEMES",
@@ -40,12 +54,62 @@ GUID_SCHEMES: dict[str, tuple[str, ...]] = {
 }
 
 
+@dataclass(slots=True)
+class _Health:
+    """One provider's recent record, for the run it belongs to."""
+
+    strikes: int = 0
+    stand_downs: int = 0
+    until: float = 0.0
+
+
 class ProviderPool:
-    """Owns the HTTP client and the provider instances for one run."""
+    """Owns the HTTP client and the provider instances for one run.
+
+    It also keeps each provider's recent record. A source that has stopped
+    answering is stood down for a moment so the rest of the library goes
+    straight to the next one instead of paying its retries title by title.
+    """
 
     def __init__(self, providers: list[Provider], client: httpx.AsyncClient) -> None:
         self.providers = providers
         self._client = client
+        self._health = {p.name: _Health() for p in providers}
+        #: Answers of any kind, counted the moment they arrive. The run asks
+        #: this before giving up, because a written item lands in the report
+        #: much later than the answer that produced it.
+        self.answers = 0
+
+    def usable(self, providers: list[Provider]) -> list[Provider]:
+        """Those of ``providers`` not currently standing down."""
+        now = time.monotonic()
+        return [p for p in providers if self._health[p.name].until <= now]
+
+    def note_reachable(self, provider: Provider) -> None:
+        """The provider answered -- whatever the answer was."""
+        self.answers += 1
+        health = self._health[provider.name]
+        health.strikes = 0
+        health.until = 0.0
+
+    def note_unreachable(self, provider: Provider, reason: str) -> bool:
+        """Record a transport failure. True when it stands the provider down."""
+        health = self._health[provider.name]
+        if health.until > time.monotonic():
+            # Already standing down: the requests that were in flight when it
+            # started are the same incident, not evidence of a longer outage.
+            return False
+        health.strikes += 1
+        if health.strikes < UNHEALTHY_AFTER:
+            return False
+        health.strikes = 0
+        health.stand_downs += 1
+        pause = min(COOLDOWN_S * 2 ** (health.stand_downs - 1), MAX_COOLDOWN_S)
+        health.until = time.monotonic() + pause
+        log.warning(
+            "%s is not answering (%s); leaving it alone for %.0fs", provider.name, reason, pause
+        )
+        return True
 
     @property
     def request_count(self) -> int:

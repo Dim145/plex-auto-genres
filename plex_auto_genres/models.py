@@ -150,7 +150,7 @@ class ItemOutcome:
     """What happened to one media item during a run."""
 
     item: MediaItem
-    status: str  # "written" | "skipped" | "failed" | "unchanged"
+    status: str  # "written" | "unchanged" | "skipped" | "deferred" | "failed"
     genres: list[str] = field(default_factory=list)
     provider: str | None = None
     provider_id: str | None = None
@@ -170,6 +170,9 @@ class RunReport:
     unchanged: int = 0
     skipped: int = 0
     failed: int = 0
+    #: Titles no source could answer for. Not failures: nothing is known about
+    #: them yet, nothing was cached, and the next run retries them at once.
+    deferred: int = 0
     plex_requests: int = 0
     provider_requests: int = 0
     duration_s: float = 0.0
@@ -182,7 +185,7 @@ class RunReport:
 
     @property
     def total(self) -> int:
-        return self.written + self.unchanged + self.skipped + self.failed
+        return self.written + self.unchanged + self.skipped + self.failed + self.deferred
 
     def as_dict(self) -> dict:
         return {
@@ -194,6 +197,7 @@ class RunReport:
             "unchanged": self.unchanged,
             "skipped": self.skipped,
             "failed": self.failed,
+            "deferred": self.deferred,
             "total": self.total,
             "plex_requests": self.plex_requests,
             "provider_requests": self.provider_requests,

@@ -37,3 +37,15 @@ class ProviderNotFound(ProviderError):
     """The provider has no record matching the query. Retrying will not help."""
 
     retryable = False
+
+
+class ProviderUnavailable(ProviderError):
+    """No source could be reached, so nothing is known about this title yet.
+
+    The opposite of :class:`ProviderNotFound`, which *is* an answer. Because
+    this one carries no information about the title, the pipeline never writes
+    it to the cache: the item stays pending and the next run retries it
+    immediately, instead of hiding behind the failure backoff for an hour.
+    """
+
+    retryable = True

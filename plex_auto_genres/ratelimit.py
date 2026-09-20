@@ -55,15 +55,28 @@ class TokenBucket:
             await asyncio.sleep(max(wait, 0.01))
 
 
+#: A 429 landing within this long of the last cooldown counts as the same
+#: refusal continuing, and doubles the next pause.
+PENALTY_MEMORY_S = 30.0
+#: Ceiling on that doubling.
+PENALTY_ESCALATION_MAX = 8.0
+#: However long the escalation -- or the provider's own Retry-After -- works
+#: out to, requests are never held for longer than this at a stretch. A
+#: provider still refusing afterwards simply earns another cooldown.
+MAX_PENALTY_S = 60.0
+
+
 class CompositeLimiter:
     """Several buckets that must all allow a request (e.g. 3/s *and* 60/min)."""
 
-    __slots__ = ("_buckets", "_penalty_lock", "_penalty_until")
+    __slots__ = ("_buckets", "_penalty_lock", "_penalty_until", "_streak", "_streak_until")
 
     def __init__(self, *buckets: TokenBucket) -> None:
         self._buckets = buckets
         self._penalty_until = 0.0
         self._penalty_lock = asyncio.Lock()
+        self._streak = 0
+        self._streak_until = 0.0
 
     async def acquire(self) -> None:
         """Wait until every bucket allows a request."""
@@ -77,10 +90,46 @@ class CompositeLimiter:
         for bucket in self._buckets:
             await bucket.acquire()
 
-    async def penalise(self, seconds: float) -> None:
-        """Back off for ``seconds`` after the provider returned HTTP 429."""
+    async def penalise(self, seconds: float, *, escalate: bool = True) -> float:
+        """Back off after HTTP 429, harder each time it keeps happening.
+
+        Returns the pause actually applied. A provider policing a rolling
+        window goes on refusing for the rest of that window, so repeating one
+        short pause only burns the item's attempts; each refusal that lands in
+        the shadow of the previous one therefore doubles the wait.
+
+        ``escalate=False`` marks a retry of the refusal already counted: one
+        title retrying three times is one incident, and letting it climb the
+        ladder by itself would price a single hiccup like a sustained outage.
+        """
         async with self._penalty_lock:
-            self._penalty_until = max(self._penalty_until, time.monotonic() + max(seconds, 0.0))
+            now = time.monotonic()
+            if escalate or not self._streak:
+                self._streak = self._streak + 1 if now < self._streak_until else 1
+            factor = min(2.0 ** (self._streak - 1), PENALTY_ESCALATION_MAX)
+            delay = max(seconds, 0.0) * factor
+            self._penalty_until = min(max(self._penalty_until, now + delay), now + MAX_PENALTY_S)
+            self._streak_until = self._penalty_until + PENALTY_MEMORY_S
+            return self._penalty_until - now
+
+    def note_success(self) -> None:
+        """A request got through: unwind one step of the escalation."""
+        if self._streak:
+            self._streak -= 1
+
+
+#: How much of a long window may be spent in one go. Handing out a whole
+#: minute's allowance as a single burst is what trips a provider's own
+#: rolling-window limiter: we deliver the entire minute in the first few
+#: seconds, it sees the spike, and everything after that comes back 429.
+BURST_SECONDS = 5.0
+
+
+def _burst_for(rate: float, period: float) -> float:
+    """Stock for a window: the full rate per second, five seconds' worth above."""
+    if period <= 1.0:
+        return rate
+    return max(1.0, min(rate, rate / period * BURST_SECONDS))
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,7 +139,9 @@ class LimitSpec:
     windows: tuple[tuple[float, float], ...]
 
     def build(self) -> CompositeLimiter:
-        return CompositeLimiter(*(TokenBucket(rate=n, period=p, burst=n) for n, p in self.windows))
+        return CompositeLimiter(
+            *(TokenBucket(rate=n, period=p, burst=_burst_for(n, p)) for n, p in self.windows)
+        )
 
 
 #: One limiter per provider per event loop. A provider's quota is per

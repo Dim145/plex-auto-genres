@@ -156,6 +156,8 @@ class JobProgress(BaseModel):
     written: int = 0
     unchanged: int = 0
     failed: int = 0
+    #: Titles no source could answer for; left pending, not cached as failures.
+    deferred: int = 0
     title: str | None = None
 
 

@@ -126,6 +126,8 @@ def print_report(report: RunReport, style: Style, *, stream: TextIO | None = Non
         bits.append(style.dim(f"{report.skipped} cached"))
     if report.failed:
         bits.append(style.red(f"{report.failed} failed"))
+    if report.deferred:
+        bits.append(style.yellow(f"{report.deferred} deferred"))
     print("  " + (", ".join(bits) if bits else style.dim("nothing to do")), file=out)
     print(
         style.dim(
@@ -135,14 +137,28 @@ def print_report(report: RunReport, style: Style, *, stream: TextIO | None = Non
         file=out,
     )
 
+    if report.deferred:
+        print(
+            style.yellow(
+                f"  {report.deferred} titles were left alone: no source answered for them. "
+                "Nothing was cached, so the next run picks them straight back up."
+            ),
+            file=out,
+        )
     if report.failures:
-        print(style.red(f"  first {min(len(report.failures), 5)} failures:"), file=out)
-        for title, error in report.failures[:5]:
+        shown = report.failures[:5]
+        print(style.red(f"  first {len(shown)} unresolved:"), file=out)
+        for title, error in shown:
             print(f"    - {title}: {error}", file=out)
-        if report.failed > 5:
+        rest = report.failed + report.deferred - len(shown)
+        if rest > 0:
+            print(style.dim(f"    ... and {rest} more"), file=out)
+        # Only cached failures are listable; deferred titles were deliberately
+        # not written down, so the command would not show them.
+        if report.failed > len(shown):
             print(
-                style.dim(f"    ... run 'plex-auto-genres failures --library "
-                          f"\"{report.library}\"' for the rest"),
+                style.dim(f"    run 'plex-auto-genres failures --library "
+                          f"\"{report.library}\"' for the recorded ones"),
                 file=out,
             )
     if not report.dry_run and report.written:

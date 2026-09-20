@@ -21,7 +21,13 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from .config import AppConfig, LibraryRun
-from .errors import PlexConnectionError, ProviderError, ProviderNotFound
+from .errors import (
+    PlexConnectionError,
+    ProviderAuthError,
+    ProviderError,
+    ProviderNotFound,
+    ProviderUnavailable,
+)
 from .models import ExternalId, ItemOutcome, MediaItem, ProviderResult, RunReport, TagField
 from .plexsvc import client as plex_client
 from .plexsvc.writer import PlexWriter, sort_collections, upload_posters
@@ -29,6 +35,11 @@ from .providers import AniDbMapper, LookupRequest, Provider, ProviderPool, build
 from .store import CachedState, Store
 
 log = logging.getLogger(__name__)
+
+#: Titles in a row that no source could answer before a run gives up. Long
+#: enough to ride out a bad minute, short enough that a library of thousands
+#: does not grind through the whole list against an API that is down.
+GIVE_UP_AFTER = 25
 
 
 def media_key(item: MediaItem) -> str:
@@ -126,19 +137,52 @@ class Pipeline:
         writer: PlexWriter,
     ) -> None:
         """Tally every task as it lands. On any interruption, wind down first."""
+        report = scope.report
+        waiting = set(tasks)
+        tallied: set[asyncio.Task] = set()
         try:
-            for coro in asyncio.as_completed(tasks):
-                outcome = await coro
-                self._tally(scope.report, outcome)
-                if progress is not None:
-                    progress(outcome)
+            while waiting:
+                landed, waiting = await asyncio.wait(
+                    waiting, return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in landed:
+                    outcome = task.result()
+                    tallied.add(task)
+                    self._tally(report, outcome)
+                    if progress is not None:
+                        progress(outcome)
+                if self._nothing_is_answering(report, pool):
+                    report.error = (
+                        f"Stopped after {GIVE_UP_AFTER} titles no source could answer, with "
+                        "nothing at all getting through. The rest of the library was left "
+                        "untouched, and the next run carries on from there."
+                    )
+                    log.warning("%s: %s", report.library, report.error)
+                    await self._settle(scope, tasks, pool, writer, close=False, tallied=tallied)
+                    return
         except asyncio.CancelledError:
-            scope.report.cancelled = True
-            await self._settle(scope, tasks, pool, writer, close=True)
+            report.cancelled = True
+            await self._settle(scope, tasks, pool, writer, close=True, tallied=tallied)
             raise
         except Exception:
-            await self._settle(scope, tasks, pool, writer, close=False)
+            await self._settle(scope, tasks, pool, writer, close=False, tallied=tallied)
             raise
+
+    @staticmethod
+    def _nothing_is_answering(report: RunReport, pool: ProviderPool | None) -> bool:
+        """Enough titles deferred, and not one answer from any source.
+
+        Counting deferrals *in a row* read well and was wrong: a deferral
+        returns at once while a written item waits for a Plex round trip on
+        another thread, so completion order bunches deferrals together and a
+        half-healthy library looked dead. The pool is asked instead, because it
+        counts answers when they arrive rather than when they finish landing.
+        """
+        if report.deferred < GIVE_UP_AFTER:
+            return False
+        if pool is not None and pool.answers:
+            return False
+        return not (report.written or report.unchanged or report.failed)
 
     async def _settle(
         self,
@@ -148,6 +192,7 @@ class Pipeline:
         writer: PlexWriter,
         *,
         close: bool,
+        tallied: set[asyncio.Task] | None = None,
     ) -> None:
         """Stop in-flight items and record what did happen.
 
@@ -161,6 +206,15 @@ class Pipeline:
         if close:
             scope.close()
         await asyncio.gather(*tasks, return_exceptions=True)
+        # An item that landed while the rest were being cancelled has already
+        # written to Plex. Leaving it out makes the report claim less than the
+        # run did -- visible as written=0 beside a non-zero Plex write count.
+        for task in tasks:
+            if (tallied is not None and task in tallied) or task.cancelled():
+                continue
+            if task.done() and task.exception() is None:
+                self._tally(scope.report, task.result())
+        scope.report.plex_requests = writer.requests
 
     # -- genre / collection tagging --------------------------------------
 
@@ -246,6 +300,14 @@ class Pipeline:
                         provider_id=result.provider_id,
                     )
 
+                except ProviderUnavailable as exc:
+                    # Not the title's fault, so nothing is written to the
+                    # cache: a failure row would hide the item behind the
+                    # retry backoff for an hour over an outage that may be
+                    # over in a minute. It stays pending for the next run.
+                    return ItemOutcome(
+                        item=item, status="deferred", error=str(exc), retryable=True
+                    )
                 except (ProviderError, PlexConnectionError) as exc:
                     if not self.dry_run:
                         self.store.record_failure(
@@ -329,18 +391,53 @@ class Pipeline:
 
         errors: list[str] = []
         providers: list[Provider] = list(pool.providers)
-        if binding is not None:
-            # A manual binding names its provider; try that one first.
-            providers.sort(key=lambda p: p.name != binding[0])
+        # A binding names an id *scheme* ("mal"), not a provider: the one to
+        # try first is whichever provider resolves that scheme. Comparing it
+        # to the provider's name left the order untouched for every scheme but
+        # "anilist", so a pinned id was tried in whatever order was configured.
+        pinned_by = binding[0] if binding is not None else None
+        if pinned_by is not None:
+            providers.sort(key=lambda p: pinned_by not in p.guid_schemes)
 
-        for provider in providers:
+        live = pool.usable(providers)
+        if pinned_by is not None:
+            # A pinned id is worth one request even to a source that is
+            # standing down: answering from somewhere else would quietly
+            # override the match the user chose by hand.
+            live = [p for p in providers if p in live or pinned_by in p.guid_schemes]
+        #: A source that is standing down counts as silent without being asked.
+        silent = len(live) < len(providers)
+        answered = False
+        for provider in live:
             try:
-                return await provider.resolve(request)
+                result = await provider.resolve(request)
             except ProviderNotFound as exc:
+                # A verdict: this source has no such title. Move on.
+                answered = True
+                pool.note_reachable(provider)
+                errors.append(str(exc))
+            except ProviderAuthError as exc:
+                # Reachable, just refusing our key. No verdict, but retrying
+                # will not produce one either.
+                pool.note_reachable(provider)
                 errors.append(str(exc))
             except ProviderError as exc:
+                silent = True
                 errors.append(str(exc))
-        raise ProviderNotFound("; ".join(errors) or "no provider could resolve this title")
+                pool.note_unreachable(provider, str(exc))
+            else:
+                pool.note_reachable(provider)
+                return result
+
+        detail = "; ".join(errors)
+        if silent and not answered:
+            # Nobody said this title does not exist -- they just did not
+            # answer. Raising "not found" here is what used to cache a live
+            # title as a dead one. One source answering settles it, though:
+            # basing this on "somebody was silent" alone turned every genuine
+            # miss into a deferral for as long as any source stood down.
+            raise ProviderUnavailable(detail or "no source was reachable")
+        raise ProviderNotFound(detail or "no provider could resolve this title")
 
     @staticmethod
     def _tally(report: RunReport, outcome: ItemOutcome) -> None:
@@ -350,6 +447,9 @@ class Pipeline:
             report.unchanged += 1
         elif outcome.status == "skipped":
             report.skipped += 1
+        elif outcome.status == "deferred":
+            report.deferred += 1
+            report.failures.append((outcome.item.identifier, outcome.error or "no source answered"))
         else:
             report.failed += 1
             report.failures.append((outcome.item.identifier, outcome.error or "unknown"))
@@ -403,6 +503,10 @@ class Pipeline:
                     async with write_sem:
                         ok = await asyncio.to_thread(writer.set_rating, item, score)
                     return ItemOutcome(item=item, status="written" if ok else "unchanged")
+                except ProviderUnavailable as exc:
+                    return ItemOutcome(
+                        item=item, status="deferred", error=str(exc), retryable=True
+                    )
                 except (ProviderError, PlexConnectionError) as exc:
                     return ItemOutcome(
                         item=item, status="failed", error=str(exc),

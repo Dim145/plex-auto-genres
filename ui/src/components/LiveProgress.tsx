@@ -38,6 +38,11 @@ export function LiveProgress({
             <span className="tone-amber">{int(progress.written)} written</span>
             <span className="muted"> · {int(progress.unchanged)} unchanged</span>
             {progress.failed > 0 && <span className="tone-fail"> · {int(progress.failed)} failed</span>}
+            {progress.deferred > 0 && (
+              <span className="tone-amber" title="No source answered; left for the next run">
+                {" "}· {int(progress.deferred)} deferred
+              </span>
+            )}
           </span>
         )}
       </div>

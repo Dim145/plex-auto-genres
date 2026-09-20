@@ -78,12 +78,18 @@ export default function RunDetail() {
     }
   };
 
+  const deferred = report?.deferred ?? 0;
+  const unresolved = (report?.failed ?? 0) + deferred;
+  // Nothing broke: a source stopped answering part-way through.
+  const stoppedShort = deferred > 0 && !report?.failed;
+
   const cells: [string, string, string?][] = report
     ? [
         ["Written", int(report.written), "amber"],
         ["Already correct", int(report.unchanged)],
         ["Cached", int(report.skipped)],
         ["Failed", int(report.failed), report.failed ? "fail" : undefined],
+        ["Deferred", int(deferred), deferred ? "amber" : undefined],
         ["Plex writes", int(report.plex_requests), "amber"],
         ["Provider calls", int(report.provider_requests), "teal"],
         ["Duration", duration(report.duration_s)],
@@ -139,8 +145,12 @@ export default function RunDetail() {
       </div>
 
       {report?.error && (
-        <Panel {...reveal(2)} eyebrow="Aborted" title="This action could not proceed">
-          <p className="tone-fail mono">{report.error}</p>
+        <Panel
+          {...reveal(2)}
+          eyebrow={stoppedShort ? "Stopped early" : "Aborted"}
+          title={stoppedShort ? "This action did not finish" : "This action could not proceed"}
+        >
+          <p className={`${stoppedShort ? "tone-amber" : "tone-fail"} mono`}>{report.error}</p>
         </Panel>
       )}
 
@@ -180,7 +190,20 @@ export default function RunDetail() {
       ) : null}
 
       {report && report.failures.length > 0 && (
-        <Panel {...reveal(4)} eyebrow="Failures" title={`${int(report.failed)} could not be resolved`} aside={report.failed > report.failures.length ? <span className="faint mono">showing first {report.failures.length}</span> : undefined}>
+        <Panel
+          {...reveal(4)}
+          eyebrow={stoppedShort ? "Deferred" : "Failures"}
+          title={stoppedShort
+            ? `${int(deferred)} left for the next run`
+            : `${int(unresolved)} could not be resolved`}
+          aside={unresolved > report.failures.length ? <span className="faint mono">showing first {report.failures.length}</span> : undefined}
+        >
+          {deferred > 0 && (
+            <p className="tone-amber" style={{ margin: "0 0 16px" }}>
+              {int(deferred)} of these were left for the next run: no source answered, so nothing
+              was written to the cache and they are still pending.
+            </p>
+          )}
           <ul className="failures">
             {report.failures.map(([title, error], i) => (
               <li key={`${title}-${i}`}>
@@ -189,9 +212,11 @@ export default function RunDetail() {
               </li>
             ))}
           </ul>
-          <p className="faint" style={{ marginTop: 16 }}>
-            Pin the right id with <code>plex-auto-genres bind "{r.library}" "&lt;title&gt;" &lt;provider&gt; &lt;id&gt;</code>.
-          </p>
+          {!stoppedShort && (
+            <p className="faint" style={{ marginTop: 16 }}>
+              Pin the right id with <code>plex-auto-genres bind "{r.library}" "&lt;title&gt;" &lt;provider&gt; &lt;id&gt;</code>.
+            </p>
+          )}
         </Panel>
       )}
     </div>

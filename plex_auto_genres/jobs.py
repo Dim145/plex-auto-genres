@@ -66,6 +66,7 @@ class Progress:
     written: int = 0
     unchanged: int = 0
     failed: int = 0
+    deferred: int = 0
     title: str | None = None
 
 
@@ -411,12 +412,15 @@ class _JobObserver:
             p.written += 1
         elif outcome.status == "unchanged":
             p.unchanged += 1
+        elif outcome.status == "deferred":
+            p.deferred += 1
         elif outcome.status == "failed":
             p.failed += 1
         p.title = outcome.item.title
         self._m.emit(job, "item", {
             "job_id": job.job_id, "run_id": p.run_id, "done": p.done, "pending": p.pending,
             "written": p.written, "unchanged": p.unchanged, "failed": p.failed,
+            "deferred": p.deferred,
             "title": outcome.item.title, "status": outcome.status,
             "error": outcome.error,
         })

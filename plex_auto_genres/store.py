@@ -163,6 +163,11 @@ def run_status(row: sqlite3.Row, *, live: bool) -> str:
         return "running" if live else "interrupted"
     if report is None:
         return "interrupted"
+    if report.get("deferred", 0) and not report.get("failed", 0):
+        # Nothing broke: some titles simply had no source to answer them, and
+        # the run may well have stopped early over it. Checked before the
+        # error below, which that stop also sets.
+        return "partial"
     if report.get("error") or report.get("failed", 0):
         return "partial" if report.get("written", 0) else "failed"
     return "ok"
@@ -400,6 +405,18 @@ class Store:
     def clear_library(self, library: str) -> int:
         with self._tx() as conn:
             cur = conn.execute("DELETE FROM media_state WHERE library = ?", (library,))
+        return cur.rowcount
+
+    def clear_failures(self, library: str) -> int:
+        """Drop the failed entries so the next run retries them straight away.
+
+        Only the failures: wiping the whole library to retry a handful of
+        titles means re-tagging everything that was already correct.
+        """
+        with self._tx() as conn:
+            cur = conn.execute(
+                "DELETE FROM media_state WHERE library = ? AND status = 'failed'", (library,)
+            )
         return cur.rowcount
 
     def failures(self, library: str, limit: int = 100) -> list[sqlite3.Row]:

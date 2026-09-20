@@ -169,6 +169,41 @@ plex-auto-genres bind Animes "Monster" mal 19     # pin it; clears the cached ma
 plex-auto-genres run --library Animes
 ```
 
+### When a source stops answering
+
+Public metadata APIs have bad days, and a large library is exactly what brings
+one on. Titles a source could not answer for are reported as **deferred**, not
+failed: nothing is written to the cache, so the next run picks them straight
+back up instead of holding them behind the hour-long retry backoff a real
+failure earns.
+
+Three things keep a bad day from becoming a bad library:
+
+- Requests are paced to a few seconds' worth of each published limit at a time,
+  rather than spending a whole minute's allowance in its first seconds.
+- A refusal pauses every request to that source, and the pause doubles while
+  the refusals continue.
+- A source that has stopped answering is stood down for a moment, so the rest
+  of the run goes straight to the next one. With nothing left to ask, the run
+  stops early and says so, rather than grinding through thousands of titles.
+
+Listing a second source is what makes all of this invisible. For anime,
+MyAnimeList first and AniList behind it covers almost everything, and TMDB can
+be added as a last resort:
+
+```json
+{ "library": "Animes", "type": "anime", "providers": ["jikan", "anilist", "tmdb"] }
+```
+
+Titles an earlier version already wrote off as failures are still sitting
+behind their retry backoff. Clear those entries — and only those — then run
+again:
+
+```bash
+plex-auto-genres failures --library Animes --retry
+plex-auto-genres run --library Animes
+```
+
 ---
 
 ## Configuration

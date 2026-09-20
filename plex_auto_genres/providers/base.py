@@ -19,6 +19,17 @@ log = logging.getLogger(__name__)
 
 USER_AGENT = "plex-auto-genres/2.0"
 
+#: Pause after a 429 that came with no Retry-After header. Providers that
+#: police a rolling minute keep refusing for the rest of it, so the pause has
+#: to be worth the wait; :meth:`CompositeLimiter.penalise` grows it from here
+#: while the refusals continue.
+DEFAULT_COOLDOWN_S = 5.0
+#: Once a cooldown reaches this, retrying *this* title is a waste: the pause
+#: is already in force for every request, so the title is handed back as
+#: unresolved and the next run picks it up. Sitting through three of these
+#: per title is what turned one bad minute into a library of failures.
+RETRY_CEILING_S = 20.0
+
 
 @dataclass(slots=True)
 class LookupRequest:
@@ -67,6 +78,7 @@ class HttpTransport:
         and its per-item failure handling see one error family.
         """
         last_exc: Exception | None = None
+        refused = False
         for attempt in range(1, self._max_attempts + 1):
             await self._limiter.acquire()
             try:
@@ -78,15 +90,20 @@ class HttpTransport:
                 continue
 
             if response.status_code == 429:
-                retry_after = _parse_retry_after(response) or 2.0 * attempt
-                await self._limiter.penalise(retry_after)
-                last_exc = ProviderRateLimited(
-                    f"{self._name}: rate limited", retry_after=retry_after
+                asked = _parse_retry_after(response)
+                paused = await self._limiter.penalise(
+                    DEFAULT_COOLDOWN_S if asked is None else asked, escalate=not refused
                 )
-                log.debug("%s: 429, backing off %.1fs", self._name, retry_after)
+                refused = True
+                last_exc = ProviderRateLimited(f"{self._name}: rate limited", retry_after=paused)
+                log.debug("%s: 429, holding every request for %.1fs", self._name, paused)
+                if paused >= RETRY_CEILING_S:
+                    break
                 continue
 
             if response.status_code == 404:
+                # An answer, and proof the source is up.
+                self._limiter.note_success()
                 raise ProviderNotFound(f"{self._name}: no record at {url}")
 
             if 500 <= response.status_code < 600:
@@ -95,6 +112,7 @@ class HttpTransport:
                 continue
 
             if response.status_code in (401, 403):
+                self._limiter.note_success()
                 raise ProviderAuthError(
                     f"{self._name}: HTTP {response.status_code} -- check the API key"
                 )
@@ -102,6 +120,7 @@ class HttpTransport:
             # KeyError that aborted the whole run.
             if response.status_code >= 400:
                 raise ProviderError(f"{self._name}: HTTP {response.status_code} for {url}")
+            self._limiter.note_success()
             return response
 
         raise last_exc or ProviderError(f"{self._name}: exhausted retries for {url}")
@@ -112,9 +131,17 @@ class HttpTransport:
 
     @staticmethod
     async def _sleep_backoff(attempt: int) -> None:
-        # Full jitter, so parallel workers do not retry in lockstep.
+        """Exponential backoff with jitter, and a floor under it.
+
+        The jitter keeps parallel workers from retrying in lockstep. The floor
+        matters just as much: jitter measured from zero lets a worker hit a
+        gateway that is already timing out again before it has had a moment.
+        """
+        step = 2.0 ** (attempt - 1)
+        low = min(0.5 * step, 8.0)
+        high = min(2.0 * step, 30.0)
         # Not security-relevant: a timing jitter, so the PRNG is the right tool.
-        await asyncio.sleep(random.uniform(0, min(2 ** attempt * 0.25, 8.0)))  # nosec B311
+        await asyncio.sleep(random.uniform(low, high))  # nosec B311
 
 
 def _parse_retry_after(response: httpx.Response) -> float | None:

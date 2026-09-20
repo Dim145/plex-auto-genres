@@ -10,8 +10,14 @@ import pytest
 import respx
 
 from plex_auto_genres.config import AppConfig
-from plex_auto_genres.jobs import JobConflict, JobManager, JobOptions
-from plex_auto_genres.models import ExternalId, MediaType, ProviderResult
+from plex_auto_genres.jobs import Job, JobConflict, JobManager, JobOptions, _JobObserver
+from plex_auto_genres.models import (
+    ExternalId,
+    ItemOutcome,
+    MediaItem,
+    MediaType,
+    ProviderResult,
+)
 from plex_auto_genres.providers.jikan import JikanProvider
 from plex_auto_genres.store import Store
 
@@ -319,3 +325,19 @@ async def test_enqueue_many_is_all_or_nothing(manager: JobManager):
     with pytest.raises(JobConflict):
         manager.enqueue_many(["Animes", "animes"])
     assert manager.list() == []
+
+
+async def test_a_deferred_item_is_counted_apart_from_a_failure(manager: JobManager):
+    """The live counters must not report an outage as a library full of failures."""
+    job = Job(job_id="j1", library="Animes", options=JobOptions())
+    observer = _JobObserver(manager, job)
+    run = make_config().libraries[0]
+    observer.begin(run, "genres", "r1", total=3, pending=3)
+
+    media = MediaItem(rating_key=1, title="Title", year=2000)
+    observer.item(run, ItemOutcome(item=media, status="written"))
+    observer.item(run, ItemOutcome(item=media, status="deferred", error="jikan: rate limited"))
+    observer.item(run, ItemOutcome(item=media, status="failed", error="no match"))
+
+    assert (job.progress.written, job.progress.deferred, job.progress.failed) == (1, 1, 1)
+    assert job.progress.done == 3

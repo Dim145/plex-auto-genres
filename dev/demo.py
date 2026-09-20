@@ -352,6 +352,19 @@ def write_png(path: Path, rgb: tuple[int, int, int], size: int = 8) -> None:
     )
 
 
+def _seeded_error(kind: str, deferred: int) -> str | None:
+    """The run-level note, for the two kinds of run that carry one."""
+    from plex_auto_genres.pipeline import GIVE_UP_AFTER
+
+    if kind == "error":
+        return "PlexConnectionError: Plex stopped answering"
+    if deferred >= GIVE_UP_AFTER:
+        return (f"Stopped after {GIVE_UP_AFTER} titles no source could answer, with nothing "
+                "at all getting through. The rest of the library was left untouched, and the "
+                "next run carries on from there.")
+    return None
+
+
 def seed(data: Path, sections: list[Section]) -> None:
     from plex_auto_genres.config import load_config
     from plex_auto_genres.models import RunReport
@@ -431,20 +444,26 @@ def seed(data: Path, sections: list[Section]) -> None:
             dry = i % 13 == 0
             run_id = store.start_run(library, action, dry_run=dry)
             started = now - (42 - i) * 3600 * rng.uniform(5, 12)
-            kind = rng.choices(["ok", "partial", "failed", "undone", "interrupted", "cancelled", "error"],
-                               [12, 3, 1, 1, 1, 1, 1])[0]
+            kind = rng.choices(["ok", "partial", "failed", "undone", "interrupted", "cancelled",
+                                "error", "deferred"],
+                               [12, 3, 1, 1, 1, 1, 1, 2])[0]
             written = rng.randint(0, 40) if kind not in ("failed", "error") else 0
             failed = {"partial": rng.randint(1, 6), "failed": rng.randint(3, 12)}.get(kind, 0)
+            # A source that stopped answering: nothing cached, retried next run.
+            deferred = rng.randint(6, 40) if kind == "deferred" else 0
             if kind != "interrupted":
                 report = RunReport(
                     run_id=run_id, library=library, action=action, dry_run=dry, written=written,
                     unchanged=rng.randint(10, 200), skipped=rng.randint(0, 150), failed=failed,
+                    deferred=deferred,
                     plex_requests=written, provider_requests=written * 2 + failed,
                     duration_s=rng.uniform(4, 190),
                     failures=[(title_for(9000 + k), "jikan: no match for the title")
-                              for k in range(min(failed, 5))],
+                              for k in range(min(failed, 5))]
+                    + [(title_for(9500 + k), "jikan: rate limited")
+                       for k in range(min(deferred, 5))],
                     cancelled=(kind == "cancelled"),
-                    error="PlexConnectionError: Plex stopped answering" if kind == "error" else None,
+                    error=_seeded_error(kind, deferred),
                 )
                 store.finish_run(report)
             if kind == "undone":
