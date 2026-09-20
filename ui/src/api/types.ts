@@ -294,6 +294,8 @@ export interface ItemsPage {
   page: number;
   size: number;
   counts: Record<ItemStatusFilter, number>;
+  /** Id schemes a manual binding may use here, from what the sources resolve. */
+  bind_schemes: BindingProvider[];
   items: ItemView[];
 }
 

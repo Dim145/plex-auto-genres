@@ -41,16 +41,28 @@ class LookupRequest:
     use_keywords: bool = False
     #: External ids read straight off the Plex item's GUIDs.
     external_ids: list[ExternalId] = field(default_factory=list)
-    #: A manual binding, which overrides both GUIDs and title search.
-    pinned: ExternalId | None = None
+    #: A manual binding, which overrides both GUIDs and title search: the id
+    #: the user pinned, plus every id derivable from it. A binding names an id
+    #: *scheme*, not a provider, so each provider takes whichever one it can
+    #: consume -- an AniDB pin reaches Jikan as the MAL id it maps to.
+    pinned: list[ExternalId] = field(default_factory=list)
 
     def id_for(self, *schemes: str) -> ExternalId | None:
         """The first external id matching any of ``schemes``, in that order."""
-        for scheme in schemes:
-            match = next((e for e in self.external_ids if e.scheme == scheme), None)
-            if match is not None:
-                return match
-        return None
+        return _first(self.external_ids, schemes)
+
+    def pinned_for(self, *schemes: str) -> ExternalId | None:
+        """The pinned id this provider can consume, if the binding reaches it."""
+        return _first(self.pinned, schemes)
+
+
+def _first(ids: list[ExternalId], schemes: tuple[str, ...]) -> ExternalId | None:
+    """The first id matching any of ``schemes``, in the order given."""
+    for scheme in schemes:
+        match = next((e for e in ids if e.scheme == scheme), None)
+        if match is not None:
+            return match
+    return None
 
 
 class HttpTransport:
@@ -196,8 +208,9 @@ class Provider(abc.ABC):
         Reading the id off the Plex GUID is the single biggest accuracy win
         over v1, which always searched by title and blindly took result [0].
         """
-        if request.pinned is not None and request.pinned.scheme in self.guid_schemes:
-            result = await self.fetch_by_id(request.pinned, request)
+        pin = request.pinned_for(*self.guid_schemes)
+        if pin is not None:
+            result = await self.fetch_by_id(pin, request)
             result.matched_by = "binding"
             return result
 

@@ -262,3 +262,19 @@ def test_clear_failures_leaves_the_successes_alone(store: Store):
     assert store.get_state("A", "k1") is not None, "the successful entry survives"
     assert store.get_state("A", "k2") is None
     assert store.get_state("B", "k3") is not None, "another library is untouched"
+
+
+def test_the_cli_refuses_a_binding_nothing_can_resolve(tmp_path, config_file, monkeypatch, capsys):
+    """`bind` accepted any of the six schemes, including ones nothing reads."""
+    from plex_auto_genres import cli
+
+    monkeypatch.setenv("PLEX_BASE_URL", "http://plex:32400")
+    monkeypatch.setenv("PLEX_TOKEN", "t")
+    argv = ["--config", str(config_file), "--db", str(tmp_path / "cli.db"), "bind"]
+
+    assert cli.main([*argv, "Animes", "Monster", "tmdb", "7"]) == 1
+    refusal = capsys.readouterr().out
+    assert "tmdb" in refusal and "mal" in refusal
+
+    assert cli.main([*argv, "Animes", "Monster", "anidb", "4521"]) == 0
+    assert "bound" in capsys.readouterr().out

@@ -565,6 +565,29 @@ Three things the first cut of this got wrong, all found in review before it ship
   outage; and a wave of in-flight failures stacked several stand-downs at once, making
   the cool-off a function of `providers.concurrency` rather than of the outage.
 
+### Bindings that could never apply — done
+
+A binding stores an id *scheme* (`mal`, `anidb`, `imdb`, ...), and `Provider.resolve`
+honours a pin only when that scheme is in the provider's `guid_schemes`. Nothing claimed
+`anidb`, `tvdb` or `imdb`, yet the API, the CLI and the item picker all offered them. A
+pin on one of those was accepted, listed as a binding, and then ignored by every run,
+which fell back to the Plex GUID or a title search with no error anywhere.
+
+Both halves are now closed:
+
+- **What can be translated, is.** A pinned id goes through the same AniDB mapping table
+  a GUID does, so an AniDB pin reaches Jikan as the MAL id it maps to; and TMDB claims
+  `imdb` and `tvdb`, cross-referencing them through its `/find` endpoint. The second
+  half was never only about bindings: a film library scanned with the legacy IMDb agent
+  carries nothing else, so every one of its titles was being searched for by name
+  despite Plex knowing the exact id. `LookupRequest.pinned` became a list for this —
+  the pin plus everything derivable from it — and each provider takes the one it reads.
+- **What cannot, is refused.** `bindable_schemes()` derives the allowed set from the
+  providers' own `guid_schemes`, so there is one source of truth: the API rejects
+  anything else with the reason, the CLI does the same, and the picker offers only what
+  the library's sources can read instead of a hard-coded table that could drift. The
+  same function now answers "would this item match by GUID?" in the item browser.
+
 ### Next
 
 Decide where secrets should live if they are ever to be edited from the UI — the

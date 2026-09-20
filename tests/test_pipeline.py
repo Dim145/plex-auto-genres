@@ -9,6 +9,7 @@ from plex_auto_genres.config import AppConfig
 from plex_auto_genres.pipeline import GIVE_UP_AFTER, Pipeline, rating_bucket
 from plex_auto_genres import providers as providers_module
 from plex_auto_genres.providers import UNHEALTHY_AFTER
+from plex_auto_genres.providers.anidb_map import MAPPING_URL
 from plex_auto_genres.providers.base import HttpTransport
 from plex_auto_genres.ratelimit import LimitSpec
 from plex_auto_genres.store import Store
@@ -638,3 +639,60 @@ async def test_a_half_healthy_library_is_not_given_up_on(store: Store, monkeypat
 
     assert report.error is None, "half the library was resolving fine"
     assert report.written > 0 and report.written + report.deferred == len(items)
+
+
+# -- bindings whose id scheme no provider speaks natively -------------------
+
+
+@respx.mock
+async def test_an_anidb_binding_reaches_jikan_as_the_mal_id_it_maps_to(store: Store):
+    """The picker offers AniDB ids, and they were stored and then ignored.
+
+    Nothing claims the ``anidb`` scheme, so the pin never applied: the item
+    fell through to its Plex GUID or a title search, with no error anywhere.
+    """
+    respx.get(MAPPING_URL).mock(
+        return_value=httpx.Response(200, json=[{"anidb_id": 4521, "mal_id": 19}])
+    )
+    pinned = respx.get("https://api.jikan.moe/v4/anime/19").mock(
+        return_value=jikan_ok(19, genres=("Psychological",))
+    )
+    from_the_guid = respx.get("https://api.jikan.moe/v4/anime/1")
+
+    handle = guid_item()                      # Plex says mal://1; the user says otherwise
+    store.set_binding("Animes", "mal://1", "anidb", "4521")
+    config = make_config(clearGenres=True)
+
+    report = await Pipeline(config, store, FakeServer([handle])).tag_library(config.libraries[0])
+
+    assert report.written == 1 and handle.last_tags == ["Psychological"]
+    assert pinned.called and not from_the_guid.called
+    assert store.get_state("Animes", "mal://1").source == "binding"
+
+
+@respx.mock
+async def test_an_imdb_binding_is_honoured_through_tmdb(store: Store):
+    """Film libraries are offered IMDb ids, which only TMDB can resolve."""
+    respx.get("https://api.themoviedb.org/3/find/tt0133093").mock(
+        return_value=httpx.Response(200, json={"movie_results": [{"id": 603}]})
+    )
+    respx.get("https://api.themoviedb.org/3/movie/603").mock(
+        return_value=httpx.Response(200, json={
+            "id": 603, "title": "Film", "genres": [{"name": "Action"}]})
+    )
+    search = respx.get("https://api.themoviedb.org/3/search/movie")
+
+    handle = FakePlexItem(1, "Film", 1999, genres=("Old",))
+    store.set_binding("Films", "Film (1999)", "imdb", "tt0133093")
+    config = AppConfig.model_validate({
+        "version": 2,
+        "libraries": [{"library": "Films", "type": "standard-movie",
+                       "useGenres": True, "clearGenres": True}],
+        "providers": {"tmdb_api_key": "k"},
+    })
+
+    report = await Pipeline(config, store, FakeServer([handle])).tag_library(config.libraries[0])
+
+    assert report.written == 1 and handle.last_tags == ["Action"]
+    assert not search.called, "the pinned id settled it, no title search"
+    assert store.get_state("Films", "Film (1999)").source == "binding"

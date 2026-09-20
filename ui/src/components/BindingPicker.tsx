@@ -16,15 +16,13 @@ const SEARCHABLE: Record<MediaType, string[]> = {
 /** The id scheme a search provider's results bind as. */
 const BIND_AS: Record<string, BindingProvider> = { jikan: "mal", anilist: "anilist", tmdb: "tmdb" };
 
-const MANUAL: Record<MediaType, BindingProvider[]> = {
-  anime: ["mal", "anilist", "anidb", "tmdb"],
-  "standard-tv": ["tmdb", "tvdb", "imdb"],
-  "standard-movie": ["tmdb", "imdb"],
-};
-
 /**
  * Pick the provider record an item should resolve to. Search first (ranked
  * candidates with posters), or type an id straight in.
+ *
+ * `schemes` comes from the API rather than a table here, because only the
+ * providers know what they can resolve: offering an id nothing reads meant
+ * the pin was stored and then silently ignored on every run.
  *
  * The provider choices are seeded from `type` once, at mount: render it with
  * `key={type}` so a library whose type arrives after the first paint gets a
@@ -34,24 +32,29 @@ export function BindingPicker({
   library,
   type,
   item,
+  schemes,
   preferredProvider,
   onClose,
 }: {
   library: string;
   type: MediaType;
   item: ItemView | null;
+  schemes: BindingProvider[];
   preferredProvider?: string;
   onClose: () => void;
 }) {
   const id = useId();
   const toast = useToast();
   const create = useCreateBinding();
-  const providers = SEARCHABLE[type];
+  // Searching a catalogue whose ids this library cannot be bound to is a dead
+  // end: the result would be refused on the way back in.
+  const bindable = SEARCHABLE[type].filter((p) => schemes.includes(BIND_AS[p]!));
+  const providers = bindable.length ? bindable : SEARCHABLE[type];
   const [provider, setProvider] = useState(preferredProvider && providers.includes(preferredProvider) ? preferredProvider : providers[0]!);
   const [text, setText] = useState("");
   const [year, setYear] = useState<string>("");
   const [submitted, setSubmitted] = useState<{ q: string; year: number | null } | null>(null);
-  const [manualProvider, setManualProvider] = useState<BindingProvider>(MANUAL[type][0]!);
+  const [manualProvider, setManualProvider] = useState<BindingProvider>(schemes[0] ?? "tmdb");
   const [manualId, setManualId] = useState("");
   const [note, setNote] = useState("");
 
@@ -153,7 +156,7 @@ export function BindingPicker({
           >
             <div className="label">Or enter an id</div>
             <div className="picker__manual-row">
-              <Segmented name={`${id}-manual`} ariaLabel="Id scheme" value={manualProvider} onChange={setManualProvider} options={MANUAL[type].map((p) => ({ value: p, label: p }))} />
+              <Segmented name={`${id}-manual`} ariaLabel="Id scheme" value={manualProvider} onChange={setManualProvider} options={schemes.map((p) => ({ value: p, label: p }))} />
               <input className="input mono" aria-label="Provider id" value={manualId} onChange={(e) => setManualId(e.target.value)} placeholder="id" />
               <button type="submit" className="button button--ghost" disabled={!manualId.trim() || create.isPending}>
                 Bind

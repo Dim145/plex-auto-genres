@@ -434,3 +434,85 @@ async def test_a_standing_down_source_ignores_what_was_already_in_flight():
         for _ in range(UNHEALTHY_AFTER * 3):
             assert pool.note_unreachable(provider, "HTTP 504") is False
         assert pool._health["jikan"].stand_downs == 1   # noqa: SLF001
+
+
+# -- ids TMDB has to cross-reference ---------------------------------------
+
+
+@respx.mock
+async def test_a_tvdb_guid_is_cross_referenced_instead_of_searched():
+    """A library scanned with the legacy TheTVDB agent carries only that id.
+
+    TMDB claimed neither it nor IMDb, so the id was dropped and the title was
+    searched for by name -- the one thing an exact id exists to avoid.
+    """
+    find = respx.get("https://api.themoviedb.org/3/find/81189").mock(
+        return_value=httpx.Response(200, json={"movie_results": [], "tv_results": [{"id": 1396}]})
+    )
+    respx.get("https://api.themoviedb.org/3/tv/1396").mock(
+        return_value=httpx.Response(200, json={
+            "id": 1396, "name": "Show", "genres": [{"name": "Drama"}]})
+    )
+    search = respx.get("https://api.themoviedb.org/3/search/tv")
+
+    provider = TmdbProvider(transport("tmdb"), api_key="k")
+    result = await provider.resolve(LookupRequest(
+        "Show", 2008, MediaType.STANDARD_TV, external_ids=[ExternalId("tvdb", "81189")],
+    ))
+
+    assert result.provider_id == "1396" and result.matched_by == "guid"
+    assert find.called and not search.called
+    assert find.calls[0].request.url.params["external_source"] == "tvdb_id"
+
+
+@respx.mock
+async def test_an_imdb_id_asks_for_the_movie_side_of_the_cross_reference():
+    respx.get("https://api.themoviedb.org/3/find/tt0133093").mock(
+        return_value=httpx.Response(200, json={
+            "movie_results": [{"id": 603}], "tv_results": [{"id": 999}]})
+    )
+    respx.get("https://api.themoviedb.org/3/movie/603").mock(
+        return_value=httpx.Response(200, json={
+            "id": 603, "title": "Film", "genres": [{"name": "Action"}]})
+    )
+    provider = TmdbProvider(transport("tmdb"), api_key="k")
+    result = await provider.fetch_by_id(
+        ExternalId("imdb", "tt0133093"),
+        LookupRequest("Film", 1999, MediaType.STANDARD_MOVIE),
+    )
+    assert result.provider_id == "603", "the library's type picks which side to read"
+
+
+@respx.mock
+async def test_an_external_id_tmdb_does_not_know_falls_back_to_the_title_search():
+    respx.get("https://api.themoviedb.org/3/find/tt0000000").mock(
+        return_value=httpx.Response(200, json={"movie_results": [], "tv_results": []})
+    )
+    respx.get("https://api.themoviedb.org/3/search/movie").mock(
+        return_value=httpx.Response(200, json={"results": [
+            {"id": 7, "title": "Film", "release_date": "1999-03-31"}]})
+    )
+    respx.get("https://api.themoviedb.org/3/movie/7").mock(
+        return_value=httpx.Response(200, json={
+            "id": 7, "title": "Film", "genres": [{"name": "Action"}]})
+    )
+    provider = TmdbProvider(transport("tmdb"), api_key="k")
+    result = await provider.resolve(LookupRequest(
+        "Film", 1999, MediaType.STANDARD_MOVIE, external_ids=[ExternalId("imdb", "tt0000000")],
+    ))
+    assert result.provider_id == "7" and result.matched_by == "search"
+
+
+def test_bindable_schemes_follow_what_the_sources_read():
+    from plex_auto_genres.providers import bindable_schemes
+
+    anime = bindable_schemes(MediaType.ANIME, ["jikan", "anilist"])
+    assert anime == ["mal", "anilist", "anidb"], "anidb arrives via the mapping table"
+    assert "tmdb" not in anime, "a library that does not read TMDB cannot pin a TMDB id"
+
+    with_fallback = bindable_schemes(MediaType.ANIME, ["jikan", "anilist", "tmdb"])
+    assert with_fallback[:3] == ["mal", "anilist", "tmdb"]
+
+    assert bindable_schemes(MediaType.STANDARD_TV, ["tmdb"]) == ["tmdb", "imdb", "tvdb"]
+    assert bindable_schemes(MediaType.STANDARD_MOVIE, ["tmdb"]) == ["tmdb", "imdb"]
+    assert bindable_schemes(MediaType.ANIME, []) == ["anidb"]

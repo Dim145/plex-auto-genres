@@ -20,7 +20,7 @@ from ..jobs import Job, JobConflict, JobError, JobManager, JobOptions
 from ..models import MediaItem, MediaType
 from ..pipeline import media_key
 from ..plexsvc.writer import undo_run
-from ..providers import GUID_SCHEMES, LookupRequest, build_providers
+from ..providers import LookupRequest, bindable_schemes, build_providers
 from ..scheduler import next_fires, validate_cron
 from ..store import CachedState, run_status
 from . import schemas
@@ -447,11 +447,7 @@ def _match_source(item: MediaItem, entry, bound: bool, cached: CachedState | Non
         return "binding"
     if cached is not None and cached.status == "ok" and cached.source:
         return cached.source
-    schemes: set[str] = set()
-    for name in entry.resolved_providers:
-        schemes.update(GUID_SCHEMES.get(name, ()))
-    if entry.type.is_anime:
-        schemes.add("anidb")  # translated through the mapping table
+    schemes = set(bindable_schemes(entry.type, entry.resolved_providers))
     return "guid" if any(g.scheme in schemes for g in item.guids) else "search"
 
 
@@ -533,7 +529,8 @@ async def library_items(
         ))
 
     return schemas.ItemsPage(
-        library=entry.library, total=len(rows), page=page, size=size, counts=counts, items=views
+        library=entry.library, total=len(rows), page=page, size=size, counts=counts,
+        bind_schemes=bindable_schemes(entry.type, entry.resolved_providers), items=views,
     )
 
 
@@ -602,6 +599,18 @@ async def create_binding(request: Request, body: schemas.BindingIn) -> schemas.B
     entry = config.find(body.library)
     if entry is None:
         raise HTTPException(status_code=404, detail=f"Library {body.library!r} is not configured.")
+    allowed = bindable_schemes(entry.type, entry.resolved_providers)
+    if body.provider not in allowed:
+        # Storing it would be worse than refusing: the pin would sit in the
+        # bindings list looking applied, and every run would ignore it.
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Nothing reading {entry.library!r} can resolve a {body.provider!r} id. "
+                f"It reads {' -> '.join(entry.resolved_providers)}, which take "
+                f"{', '.join(allowed)}."
+            ),
+        )
     state.store.set_binding(
         entry.library, body.media_key, body.provider, body.provider_id, body.note
     )

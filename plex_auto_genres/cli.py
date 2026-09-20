@@ -28,7 +28,7 @@ from .migration import legacy_logs_dir, migrate_install
 from .models import MediaType, RunReport
 from .plexsvc import client as plex_client
 from .plexsvc.writer import undo_run
-from .providers import LookupRequest, build_providers
+from .providers import LookupRequest, bindable_schemes, build_providers
 from .reporting import ProgressBar, Style, print_report
 from .runner import ACTIONS, run_libraries
 from .scheduler import SchedulePlan, Scheduler, validate_cron
@@ -321,6 +321,16 @@ def _library_name(config: AppConfig, name: str) -> str:
 def cmd_bind(args, config: AppConfig, store: Store, style: Style) -> int:
     """Pin a Plex item to a provider id."""
     library = _library_name(config, args.library)
+    entry = config.find(library)
+    if entry is not None:
+        allowed = bindable_schemes(entry.type, entry.resolved_providers)
+        if args.provider not in allowed:
+            print(style.red(f"Nothing reading {library} can resolve a {args.provider!r} id."))
+            print(style.dim(
+                f"  It reads {' -> '.join(entry.resolved_providers)}, "
+                f"which take: {', '.join(allowed)}."
+            ))
+            return 1
     store.set_binding(library, args.title, args.provider, args.provider_id, args.note)
     print(
         f"{style.green('bound')} {style.bold(args.title)} in {library} "

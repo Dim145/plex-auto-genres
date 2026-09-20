@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 import httpx
@@ -30,6 +31,7 @@ MAX_COOLDOWN_S = 300.0
 
 __all__ = [
     "GUID_SCHEMES",
+    "bindable_schemes",
     "AniDbMapper",
     "AniListProvider",
     "JikanProvider",
@@ -52,6 +54,32 @@ GUID_SCHEMES: dict[str, tuple[str, ...]] = {
     "anilist": AniListProvider.guid_schemes,
     "tmdb": TmdbProvider.guid_schemes,
 }
+
+
+#: TheTVDB catalogues series, so a film library is never offered one of its
+#: ids even though TMDB can cross-reference them.
+_SERIES_ONLY = frozenset({"tvdb"})
+
+
+def bindable_schemes(media_type: MediaType, providers: Iterable[str]) -> list[str]:
+    """Id schemes these sources can consume, in the order they would be tried.
+
+    A binding names a *scheme*, not a provider, so this is also exactly the set
+    a manual pin may use: one that nothing configured can read would be stored
+    and then silently ignored at resolve time.
+    """
+    out: list[str] = []
+    for name in providers:
+        for scheme in GUID_SCHEMES.get(name, ()):
+            if scheme in _SERIES_ONLY and media_type.is_movie:
+                continue
+            if scheme not in out:
+                out.append(scheme)
+    if media_type.is_anime and "anidb" not in out:
+        # Not read directly by anyone: translated to MAL and AniList ids
+        # through the offline mapping table.
+        out.append("anidb")
+    return out
 
 
 @dataclass(slots=True)

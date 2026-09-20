@@ -289,6 +289,10 @@ class ItemsPage(BaseModel):
         default_factory=dict,
         description="all / ok / failed / unprocessed / bound, over the whole library.",
     )
+    bind_schemes: list[str] = Field(
+        default_factory=list,
+        description="Id schemes a manual binding may use here: what these sources resolve.",
+    )
     items: list[ItemView]
 
 

@@ -169,6 +169,21 @@ plex-auto-genres bind Animes "Monster" mal 19     # pin it; clears the cached ma
 plex-auto-genres run --library Animes
 ```
 
+A binding names an **id scheme**, not a provider, and only a scheme one of the
+library's sources can read is accepted:
+
+| Library reads | Pin one of |
+|---|---|
+| `jikan` | `mal`, `anidb` |
+| `jikan`, `anilist` | `mal`, `anilist`, `anidb` |
+| `tmdb` (film) | `tmdb`, `imdb` |
+| `tmdb` (series) | `tmdb`, `imdb`, `tvdb` |
+
+An AniDB id is translated to MyAnimeList through the same offline table that
+handles `anidb://` GUIDs, and TMDB cross-references IMDb and TheTVDB ids to its
+own. Anything else is refused at the point you set it, rather than stored and
+quietly ignored on every run.
+
 ### When a source stops answering
 
 Public metadata APIs have bad days, and a large library is exactly what brings

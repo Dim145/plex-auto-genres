@@ -733,3 +733,28 @@ def test_saving_a_schedule_replans_the_running_scheduler(tmp_path, config_file, 
         refused = c.put("/api/v1/config", json=body)
         assert refused.status_code == 422
         assert refused.json()["errors"][0]["loc"] == ["schedule", "cron"]
+
+
+def test_a_binding_nothing_can_resolve_is_refused(client):
+    """Storing it would leave a pin that looks applied and is ignored forever."""
+    refused = client.post("/api/v1/bindings", json={
+        "library": "Animes", "media_key": "mal://1", "provider": "tmdb", "provider_id": "7",
+    })
+    assert refused.status_code == 422
+    detail = refused.json()["detail"]
+    assert "tmdb" in detail and "jikan" in detail
+
+    # AniDB is not read by anyone directly, but the mapping table gets there.
+    accepted = client.post("/api/v1/bindings", json={
+        "library": "Animes", "media_key": "mal://1", "provider": "anidb", "provider_id": "4521",
+    })
+    assert accepted.status_code == 201
+    assert client.get("/api/v1/bindings").json()[0]["provider"] == "anidb"
+
+
+def test_a_library_page_advertises_the_id_schemes_it_can_be_bound_with(client, monkeypatch):
+    """The picker offers these instead of a table of its own, which could drift."""
+    monkeypatch.setattr(state_module.plex_client, "iter_library", lambda server, name: [])
+    # "Animes" reads MyAnimeList only, so an AniList id cannot be pinned there.
+    page = client.get("/api/v1/libraries/Animes/items").json()
+    assert page["bind_schemes"] == ["mal", "anidb"]

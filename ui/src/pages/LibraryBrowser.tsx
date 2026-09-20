@@ -173,7 +173,7 @@ export default function LibraryBrowser() {
       </Panel>
 
       {run && (
-        <BindingPicker key={run.type} library={library} type={run.type} item={picking} preferredProvider={run.providers?.[0]} onClose={() => setPicking(null)} />
+        <BindingPicker key={run.type} library={library} type={run.type} item={picking} schemes={items.data?.bind_schemes ?? []} preferredProvider={run.providers?.[0]} onClose={() => setPicking(null)} />
       )}
     </div>
   );

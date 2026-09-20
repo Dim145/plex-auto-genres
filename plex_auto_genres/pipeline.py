@@ -379,6 +379,11 @@ class Pipeline:
         """Try each configured provider in order until one answers."""
         external_ids = await mapper.expand(item.guids)
         binding = bindings.get(media_key(item))
+        # A binding names an id *scheme* ("anidb"), not a provider. Running it
+        # through the same table a GUID goes through is what lets a pin reach
+        # a source that speaks a different scheme; without it an AniDB pin was
+        # accepted, stored, and then silently ignored at resolve time.
+        pinned = await mapper.expand([binding[1]]) if binding is not None else []
 
         request = LookupRequest(
             title=item.title,
@@ -386,25 +391,28 @@ class Pipeline:
             media_type=run.type,
             use_keywords=run.use_keywords,
             external_ids=external_ids,
-            pinned=binding[1] if binding else None,
+            pinned=pinned,
         )
+
+        def honours_pin(provider: Provider) -> bool:
+            """Can this source consume any of the ids the binding reaches?"""
+            return any(e.scheme in provider.guid_schemes for e in pinned)
 
         errors: list[str] = []
         providers: list[Provider] = list(pool.providers)
-        # A binding names an id *scheme* ("mal"), not a provider: the one to
-        # try first is whichever provider resolves that scheme. Comparing it
-        # to the provider's name left the order untouched for every scheme but
-        # "anilist", so a pinned id was tried in whatever order was configured.
-        pinned_by = binding[0] if binding is not None else None
-        if pinned_by is not None:
-            providers.sort(key=lambda p: pinned_by not in p.guid_schemes)
+        if pinned:
+            # Try whoever can honour the pin first. Comparing the binding's
+            # scheme to the provider's *name* left the order untouched for
+            # every scheme but "anilist", so a pinned id was tried in whatever
+            # order happened to be configured.
+            providers.sort(key=lambda p: not honours_pin(p))
 
         live = pool.usable(providers)
-        if pinned_by is not None:
+        if pinned:
             # A pinned id is worth one request even to a source that is
             # standing down: answering from somewhere else would quietly
             # override the match the user chose by hand.
-            live = [p for p in providers if p in live or pinned_by in p.guid_schemes]
+            live = [p for p in providers if p in live or honours_pin(p)]
         #: A source that is standing down counts as silent without being asked.
         silent = len(live) < len(providers)
         answered = False

@@ -15,6 +15,12 @@ from .base import LookupRequest, Provider, pick_best, rank_candidates, score_of,
 BASE_URL = "https://api.themoviedb.org/3"
 IMAGE_BASE = "https://image.tmdb.org/t/p/w185"
 
+#: Plex id schemes TMDB can cross-reference to one of its own, and the
+#: ``external_source`` its ``/find`` endpoint wants for each. A library scanned
+#: with the legacy IMDb or TheTVDB agent carries only these ids, and a binding
+#: can name one by hand.
+EXTERNAL_SOURCES = {"imdb": "imdb_id", "tvdb": "tvdb_id"}
+
 
 def split_compound_genres(names: list[str]) -> list[str]:
     """Expand TMDB's compound TV genres into their parts.
@@ -38,7 +44,8 @@ class TmdbProvider(Provider):
     """Genres and keywords from The Movie Database."""
 
     name = "tmdb"
-    guid_schemes = ("tmdb",)
+    #: TMDB's own id first: it is the only one that needs no cross-reference.
+    guid_schemes = ("tmdb", "imdb", "tvdb")
     #: Anime is here as a *last* fallback: TMDB carries most anime as ordinary
     #: TV or film entries, so it answers when MyAnimeList and AniList do not --
     #: with TMDB's own taxonomy ("Animation", "Action & Adventure") rather than
@@ -66,14 +73,39 @@ class TmdbProvider(Provider):
         return "movie" if media_type.is_movie else "tv"
 
     async def fetch_by_id(self, external_id: ExternalId, request: LookupRequest) -> ProviderResult:
+        tmdb_id = (
+            str(external_id.value)
+            if external_id.scheme == "tmdb"
+            else await self._cross_reference(external_id, request)
+        )
         segment = self._segment(request.media_type)
         # append_to_response folds the keywords lookup into the details call,
         # halving the round trips v1 needed.
         payload = await self.transport.get_json(
-            f"{BASE_URL}/{segment}/{external_id.value}",
+            f"{BASE_URL}/{segment}/{tmdb_id}",
             params=self._params(append_to_response="keywords"),
         )
-        return self._to_result(payload, request, str(external_id.value))
+        return self._to_result(payload, request, tmdb_id)
+
+    async def _cross_reference(self, external_id: ExternalId, request: LookupRequest) -> str:
+        """Turn an IMDb or TheTVDB id into TMDB's own, through ``/find``.
+
+        These ids were simply dropped before, so an item carrying nothing else
+        was searched for by title -- the one thing an exact id exists to avoid.
+        """
+        source = EXTERNAL_SOURCES.get(external_id.scheme)
+        if source is None:   # pragma: no cover - guarded by guid_schemes
+            raise ProviderNotFound(f"tmdb: {external_id.scheme} ids cannot be looked up")
+        segment = self._segment(request.media_type)
+        payload = await self.transport.get_json(
+            f"{BASE_URL}/find/{external_id.value}",
+            params=self._params(external_source=source),
+        )
+        results = payload.get(f"{segment}_results") or []
+        found = next((entry for entry in results if entry.get("id") is not None), None)
+        if found is None:
+            raise ProviderNotFound(f"tmdb: no {segment} cross-referenced from {external_id}")
+        return str(found["id"])
 
     async def search(self, request: LookupRequest) -> ProviderResult:
         segment = self._segment(request.media_type)
