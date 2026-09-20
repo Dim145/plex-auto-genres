@@ -55,7 +55,7 @@
             "type": "anime",
             "enabled": true,
 
-            "//providers": "Tried in order until one returns genres. anime: jikan, anilist. standard-*: tmdb.",
+            "//providers": "Tried in order until one returns genres. anime: jikan, anilist, and optionally tmdb last as a fallback. standard-*: tmdb.",
             "providers": ["jikan", "anilist"],
 
             "//useGenres": "true writes Plex's genre field; false creates collections instead.",

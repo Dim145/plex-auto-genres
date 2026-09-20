@@ -95,8 +95,9 @@ plex-auto-genres serve --host 0.0.0.0           # reachable from the LAN
 
 The API is documented at `/api/docs` once signed in.
 
-The **Config** page edits `config.json` itself: libraries (type, providers, what to
-write, post-actions, per-library overrides), the per-type defaults, and the **schedule**
+The **Config** page edits `config.json` itself: libraries (type, providers — an anime
+library can end its chain with TMDB as a last resort — what to write, post-actions,
+per-library overrides), the per-type defaults, and the **schedule**
 of the automatic pass — a preset or a cron expression checked live, with a switch to
 pause it without losing the expression; the running scheduler picks the change up as
 soon as it is saved. The server validates every keystroke. Saving writes the file atomically, keeps the previous one as

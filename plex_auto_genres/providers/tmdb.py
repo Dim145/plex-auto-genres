@@ -39,14 +39,19 @@ class TmdbProvider(Provider):
 
     name = "tmdb"
     guid_schemes = ("tmdb",)
-    supports = (MediaType.STANDARD_TV, MediaType.STANDARD_MOVIE)
+    #: Anime is here as a *last* fallback: TMDB carries most anime as ordinary
+    #: TV or film entries, so it answers when MyAnimeList and AniList do not --
+    #: with TMDB's own taxonomy ("Animation", "Action & Adventure") rather than
+    #: MAL's. It is never a default for anime; a library opts in by listing it.
+    supports = (MediaType.ANIME, MediaType.STANDARD_TV, MediaType.STANDARD_MOVIE)
 
     def __init__(self, transport, api_key: str, language: str = "en-US") -> None:
         super().__init__(transport)
         if not api_key:
             raise ProviderAuthError(
                 "TMDB_API_KEY is not set. It is required for standard-tv and "
-                "standard-movie libraries."
+                "standard-movie libraries, and for an anime library that falls "
+                "back to TMDB."
             )
         self._api_key = api_key
         self._language = language
@@ -56,6 +61,8 @@ class TmdbProvider(Provider):
 
     @staticmethod
     def _segment(media_type: MediaType) -> str:
+        # Anime searches TMDB's TV catalogue, which is where series live; an
+        # anime *film* library is better typed standard-movie.
         return "movie" if media_type.is_movie else "tv"
 
     async def fetch_by_id(self, external_id: ExternalId, request: LookupRequest) -> ProviderResult:

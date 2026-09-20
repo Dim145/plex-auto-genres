@@ -4,7 +4,7 @@ import type { LibraryRun, MediaType, ValidationIssue } from "../../api/types";
 import { Field } from "../../components/form/Field";
 import { Segmented } from "../../components/form/Segmented";
 import { Toggle } from "../../components/form/Toggle";
-import { ANIME_PROVIDER_PRESETS, TYPES, emptyRules, issueAt, issuesOwn, providerPresetKey, rulesEmpty, type Help } from "./editor";
+import { ANIME_PROVIDER_PRESETS, TYPES, animeProviders, emptyRules, hasTmdbFallback, issueAt, issuesOwn, providerPresetKey, rulesEmpty, type Help } from "./editor";
 import { RulesEditor } from "./RulesEditor";
 
 export function LibraryEditor({
@@ -97,13 +97,38 @@ export function LibraryEditor({
 
         <Field id={`${id}-providers`} label="Reads from" help={help("LibraryRun", "providers")} error={err("providers")}>
           {isAnime ? (
-            <Segmented
-              name={`${id}-providers`}
-              ariaLabel="Providers"
-              value={providerPresetKey(lib.providers)}
-              onChange={(key) => set("providers", ANIME_PROVIDER_PRESETS.find((p) => p.key === key)?.value ?? null)}
-              options={ANIME_PROVIDER_PRESETS.map((p) => ({ value: p.key, label: p.label, hint: p.hint }))}
-            />
+            <div className="stack stack--tight">
+              <Segmented
+                name={`${id}-providers`}
+                ariaLabel="Providers"
+                value={providerPresetKey(lib.providers)}
+                onChange={(key) =>
+                  set(
+                    "providers",
+                    animeProviders(
+                      ANIME_PROVIDER_PRESETS.find((p) => p.key === key)?.value ?? null,
+                      hasTmdbFallback(lib.providers),
+                    ),
+                  )
+                }
+                options={ANIME_PROVIDER_PRESETS.map((p) => ({ value: p.key, label: p.label, hint: p.hint }))}
+              />
+              <Toggle
+                id={`${id}-tmdb-fallback`}
+                checked={hasTmdbFallback(lib.providers)}
+                onChange={(on) =>
+                  set(
+                    "providers",
+                    animeProviders(
+                      ANIME_PROVIDER_PRESETS.find((p) => p.key === providerPresetKey(lib.providers))?.value ?? null,
+                      on,
+                    ),
+                  )
+                }
+                label="…then TMDB"
+                help="A last resort when no anime source answers. Returns TMDB's own genres, and needs TMDB_API_KEY."
+              />
+            </div>
           ) : (
             <div className="mono tone-teal" style={{ minHeight: 38, display: "flex", alignItems: "center" }}>tmdb</div>
           )}

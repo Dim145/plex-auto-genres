@@ -85,11 +85,36 @@ export const ANIME_PROVIDER_PRESETS: { key: string; label: string; value: string
   { key: "anilist", label: "anilist", value: ["anilist"], hint: "AniList only" },
 ];
 
+/** An anime library may end its chain with TMDB; it is never one of the presets. */
+export const ANIME_FALLBACK = "tmdb";
+
+/** The anime sources of a chain, without the optional TMDB tail. */
+const animeSources = (providers: string[] | null) =>
+  (providers ?? []).filter((p) => p !== ANIME_FALLBACK);
+
 export const providerPresetKey = (providers: string[] | null) => {
-  if (!providers || providers.length === 0) return "default";
-  const key = providers.join(",");
+  const sources = animeSources(providers);
+  if (sources.length === 0) return "default";
+  const key = sources.join(",");
   return ANIME_PROVIDER_PRESETS.some((p) => p.key === key) ? key : "default";
 };
+
+export const hasTmdbFallback = (providers: string[] | null) =>
+  (providers ?? []).includes(ANIME_FALLBACK);
+
+/**
+ * Rewrite an anime library's provider chain. `preset` picks the anime sources
+ * (null = the default, jikan), `fallback` appends TMDB after them. The chain
+ * goes back to null — "the default" — when it says nothing a default would not.
+ */
+export function animeProviders(
+  preset: string[] | null,
+  fallback: boolean,
+): string[] | null {
+  const sources = preset ?? [];
+  if (!fallback) return sources.length ? sources : null;
+  return [...(sources.length ? sources : ["jikan"]), ANIME_FALLBACK];
+}
 
 // -- JSON Schema access (help text and enums stay in step with the models) ----
 

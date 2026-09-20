@@ -37,6 +37,11 @@
   gap: 24px;
 }
 
+/* A control and the checkbox that qualifies it read as one field. */
+.stack--tight {
+  gap: 2px;
+}
+
 /* ---- lists ----------------------------------------------------------- */
 
 .list {

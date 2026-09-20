@@ -209,7 +209,10 @@ def test_search_returns_ranked_candidates(browser):
 
 def test_search_rejects_a_provider_that_cannot_serve_the_type(browser):
     c, _, _ = browser
-    response = c.get("/api/v1/search", params={"q": "x", "type": "anime", "provider": "tmdb"})
+    # The anime sources know nothing about films; TMDB, on the other hand, can
+    # serve an anime library as a last-resort fallback.
+    response = c.get("/api/v1/search", params={"q": "x", "type": "standard-movie",
+                                               "provider": "jikan"})
     assert response.status_code == 400 and "cannot serve" in response.json()["detail"]
 
 

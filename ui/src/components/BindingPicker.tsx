@@ -8,7 +8,7 @@ import { Modal } from "./Modal";
 import { useToast } from "./Toast";
 
 const SEARCHABLE: Record<MediaType, string[]> = {
-  anime: ["jikan", "anilist"],
+  anime: ["jikan", "anilist", "tmdb"],
   "standard-tv": ["tmdb"],
   "standard-movie": ["tmdb"],
 };
@@ -17,7 +17,7 @@ const SEARCHABLE: Record<MediaType, string[]> = {
 const BIND_AS: Record<string, BindingProvider> = { jikan: "mal", anilist: "anilist", tmdb: "tmdb" };
 
 const MANUAL: Record<MediaType, BindingProvider[]> = {
-  anime: ["mal", "anilist", "anidb"],
+  anime: ["mal", "anilist", "anidb", "tmdb"],
   "standard-tv": ["tmdb", "tvdb", "imdb"],
   "standard-movie": ["tmdb", "imdb"],
 };

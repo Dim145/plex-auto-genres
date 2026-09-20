@@ -416,3 +416,39 @@ async def test_a_provider_auth_failure_falls_through_to_the_next_provider(store:
 
     assert report.written == 1 and report.failed == 0
     assert store.get_state("Animes", "mal://1").source == "guid"
+
+
+@respx.mock
+async def test_an_anime_library_can_fall_back_to_tmdb(store: Store):
+    """The last resort: nothing on MAL, so TMDB's TV entry answers instead."""
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d+").mock(
+        return_value=httpx.Response(404)
+    )
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime\b").mock(
+        return_value=httpx.Response(200, json={"data": []})
+    )
+    respx.get("https://api.themoviedb.org/3/search/tv").mock(
+        return_value=httpx.Response(200, json={
+            "results": [{"id": 7, "name": "Cowboy Bebop", "first_air_date": "1998-04-03"}]
+        })
+    )
+    respx.get("https://api.themoviedb.org/3/tv/7").mock(
+        return_value=httpx.Response(200, json={
+            "id": 7, "name": "Cowboy Bebop",
+            "genres": [{"name": "Animation"}, {"name": "Sci-Fi & Fantasy"}],
+        })
+    )
+    handle = guid_item(title="Cowboy Bebop", year=1998)
+    config = AppConfig.model_validate({
+        "version": 2,
+        "defaults": {"anime": {"ignore": ["Kids"]}},
+        "libraries": [{"library": "Animes", "type": "anime", "useGenres": True,
+                       "clearGenres": True, "providers": ["jikan", "tmdb"]}],
+        "providers": {"tmdb_api_key": "k"},
+    })
+
+    report = await Pipeline(config, store, FakeServer([handle])).tag_library(config.libraries[0])
+
+    assert (report.written, report.failed) == (1, 0)
+    assert handle.last_tags == ["Animation", "Sci-Fi", "Fantasy"]
+    assert store.get_state("Animes", "mal://1").provider == "tmdb"

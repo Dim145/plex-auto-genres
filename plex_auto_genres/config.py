@@ -158,7 +158,9 @@ class LibraryRun(BaseModel):
         default=None,
         description=(
             "Metadata sources, tried in order until one returns genres. "
-            "Defaults to ['jikan'] for anime and ['tmdb'] otherwise."
+            "Defaults to ['jikan'] for anime and ['tmdb'] otherwise. An anime "
+            "library may end its list with 'tmdb' as a last resort, which "
+            "needs TMDB_API_KEY and returns TMDB's taxonomy, not MAL's."
         ),
     )
 

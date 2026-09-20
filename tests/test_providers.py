@@ -302,3 +302,45 @@ async def test_the_anidb_mapping_is_downloaded_once_under_concurrency(store):
     results = await asyncio.gather(*(mapper.expand([ExternalId("anidb", "1")]) for _ in range(5)))
     assert route.call_count == 1
     assert all(ExternalId("mal", "20") in ids for ids in results)
+
+
+# -- TMDB as an anime fallback --------------------------------------------------
+
+
+def test_tmdb_can_serve_an_anime_library_but_the_anime_sources_cannot_serve_films():
+    from plex_auto_genres.config import ProviderSettings
+    from plex_auto_genres.errors import ConfigError
+    from plex_auto_genres.providers import build_providers
+
+    settings = ProviderSettings(tmdb_api_key="k")
+    pool = build_providers(("jikan", "anilist", "tmdb"), MediaType.ANIME, settings)
+    assert [p.name for p in pool.providers] == ["jikan", "anilist", "tmdb"]
+
+    with pytest.raises(ConfigError, match="cannot serve"):
+        build_providers(("jikan",), MediaType.STANDARD_MOVIE, settings)
+
+
+def test_an_anime_chain_ending_in_tmdb_still_needs_a_key():
+    from plex_auto_genres.config import ProviderSettings
+    from plex_auto_genres.errors import ProviderAuthError
+    from plex_auto_genres.providers import build_providers
+
+    with pytest.raises(ProviderAuthError, match="TMDB_API_KEY"):
+        build_providers(("jikan", "tmdb"), MediaType.ANIME, ProviderSettings())
+
+
+@respx.mock
+async def test_tmdb_searches_the_tv_catalogue_for_an_anime_library():
+    respx.get("https://api.themoviedb.org/3/search/tv").mock(return_value=httpx.Response(200, json={
+        "results": [{"id": 42, "name": "Some Series", "first_air_date": "2011-04-01"}]
+    }))
+    respx.get("https://api.themoviedb.org/3/tv/42").mock(return_value=httpx.Response(200, json={
+        "id": 42, "name": "Some Series", "genres": [{"name": "Animation"},
+                                                    {"name": "Action & Adventure"}],
+    }))
+    result = await TmdbProvider(transport("tmdb"), api_key="k").resolve(
+        LookupRequest("Some Series", 2011, MediaType.ANIME)
+    )
+    # TMDB's taxonomy, not MAL's -- and the compound genre is still split.
+    assert result.genres == ["Animation", "Action", "Adventure"]
+    assert result.provider_id == "42"

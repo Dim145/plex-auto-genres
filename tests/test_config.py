@@ -224,3 +224,16 @@ def test_missing_config_is_fine_when_told_so(tmp_path, monkeypatch):
     monkeypatch.setenv("PLEX_TOKEN", "t")
     config = load_config(tmp_path / "absent.json", missing_ok=True)
     assert config.libraries == [] and config.plex.base_url == "http://plex:32400"
+
+
+def test_an_anime_library_may_end_its_chain_with_tmdb():
+    """TMDB is never a default for anime, but a library can opt into it."""
+    config = AppConfig.model_validate({
+        "version": 2,
+        "libraries": [
+            {"library": "Animes", "type": "anime", "providers": ["jikan", "anilist", "tmdb"]},
+            {"library": "Plain", "type": "anime"},
+        ],
+    })
+    assert config.find("Animes").resolved_providers == ("jikan", "anilist", "tmdb")
+    assert config.find("Plain").resolved_providers == ("jikan",), "still no TMDB by default"

@@ -86,7 +86,8 @@ def build_providers(
         if name == "tmdb" and not settings.tmdb_api_key:
             raise ProviderAuthError(
                 "TMDB_API_KEY is not set. It is required for standard-tv and "
-                "standard-movie libraries."
+                "standard-movie libraries, and for an anime library that falls "
+                "back to TMDB."
             )
 
     client = httpx.AsyncClient(
