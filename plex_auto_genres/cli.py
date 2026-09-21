@@ -45,6 +45,30 @@ DEFAULT_DB = "logs/plex-auto-genres.db"
 # --------------------------------------------------------------------------
 
 
+#: Id schemes a binding may name. Which of them a given library can actually
+#: resolve is checked against its sources when the binding is set.
+BINDABLE_SCHEMES = ["tmdb", "mal", "anilist", "anidb", "tvdb", "imdb"]
+
+
+def _add_binding_parsers(sub) -> None:
+    """The three commands over manual bindings, which an item holds per source."""
+    bind = sub.add_parser("bind", help="Pin a Plex item to a specific provider id.")
+    bind.add_argument("library")
+    bind.add_argument("title", help="Plex title, or the cache key shown by 'failures'.")
+    bind.add_argument("provider", choices=BINDABLE_SCHEMES)
+    bind.add_argument("provider_id")
+    bind.add_argument("--note", help="Free-text reminder of why this binding exists.")
+
+    unbind = sub.add_parser("unbind", help="Remove an item's manual bindings.")
+    unbind.add_argument("library")
+    unbind.add_argument("title")
+    unbind.add_argument("--provider", choices=BINDABLE_SCHEMES,
+                        help="Remove just this source's id, leaving the others.")
+
+    bindings = sub.add_parser("bindings", help="List manual bindings.")
+    bindings.add_argument("--library")
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the argument parser for every subcommand."""
     parser = argparse.ArgumentParser(
@@ -89,21 +113,7 @@ def build_parser() -> argparse.ArgumentParser:
     query.add_argument("--provider", action="append", help="Override the provider order.")
     query.add_argument("--keywords", action="store_true", help="TMDB: fetch keywords, not genres.")
 
-    bind = sub.add_parser("bind", help="Pin a Plex item to a specific provider id.")
-    bind.add_argument("library")
-    bind.add_argument("title", help="Plex title, or the cache key shown by 'failures'.")
-    bind.add_argument("provider", choices=["tmdb", "mal", "anilist", "anidb", "tvdb", "imdb"])
-    bind.add_argument("provider_id")
-    bind.add_argument("--note", help="Free-text reminder of why this binding exists.")
-
-    unbind = sub.add_parser("unbind", help="Remove an item's manual bindings.")
-    unbind.add_argument("library")
-    unbind.add_argument("title")
-    unbind.add_argument("--provider", choices=["tmdb", "mal", "anilist", "anidb", "tvdb", "imdb"],
-                        help="Remove just this source's id, leaving the others.")
-
-    bindings = sub.add_parser("bindings", help="List manual bindings.")
-    bindings.add_argument("--library")
+    _add_binding_parsers(sub)
 
     undo = sub.add_parser("undo", help="Restore the tags a run overwrote.")
     undo.add_argument("run_id")
