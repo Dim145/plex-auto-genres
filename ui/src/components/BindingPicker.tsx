@@ -1,7 +1,7 @@
-import { ExternalLink, Link2, Search } from "lucide-react";
+import { ExternalLink, Link2, Search, Unlink } from "lucide-react";
 import { useEffect, useId, useState, type FormEvent } from "react";
-import { useCandidates, useCreateBinding } from "../api/client";
-import type { BindingProvider, ItemView, MediaType } from "../api/types";
+import { useCandidates, useCreateBinding, useDeleteBinding } from "../api/client";
+import type { BindingProvider, BindingView, ItemView, MediaType } from "../api/types";
 import { Field } from "./form/Field";
 import { Segmented } from "./form/Segmented";
 import { Modal } from "./Modal";
@@ -46,15 +46,26 @@ export function BindingPicker({
   const id = useId();
   const toast = useToast();
   const create = useCreateBinding();
+  const remove = useDeleteBinding();
+  // Held here rather than read from `item`, which is the row as it was when
+  // the modal opened and does not follow what is pinned inside it.
+  const [pins, setPins] = useState<BindingView[]>([]);
   // Searching a catalogue whose ids this library cannot be bound to is a dead
   // end: the result would be refused on the way back in.
   const bindable = SEARCHABLE[type].filter((p) => schemes.includes(BIND_AS[p]!));
   const providers = bindable.length ? bindable : SEARCHABLE[type];
-  const [provider, setProvider] = useState(preferredProvider && providers.includes(preferredProvider) ? preferredProvider : providers[0]!);
+  // Both choices are *derived* from what the library allows, not frozen at
+  // mount: `schemes` arrives with the items query, a moment after the picker
+  // opens, and a choice made before that would be refused on the way back in.
+  const [pickedSearch, setPickedSearch] = useState<string | null>(null);
+  const provider =
+    [pickedSearch, preferredProvider].find((p) => p && providers.includes(p)) ?? providers[0]!;
   const [text, setText] = useState("");
   const [year, setYear] = useState<string>("");
   const [submitted, setSubmitted] = useState<{ q: string; year: number | null } | null>(null);
-  const [manualProvider, setManualProvider] = useState<BindingProvider>(schemes[0] ?? "tmdb");
+  const [pickedScheme, setPickedScheme] = useState<BindingProvider | null>(null);
+  const manualProvider: BindingProvider =
+    (pickedScheme && schemes.includes(pickedScheme) ? pickedScheme : schemes[0]) ?? "tmdb";
   const [manualId, setManualId] = useState("");
   const [note, setNote] = useState("");
 
@@ -66,6 +77,7 @@ export function BindingPicker({
     setSubmitted({ q: item.title, year: item.year });
     setManualId("");
     setNote("");
+    setPins(item.bindings);
   }, [item]);
 
   const candidates = useCandidates(submitted ? { q: submitted.q, type, provider, year: submitted.year } : null);
@@ -75,14 +87,28 @@ export function BindingPicker({
     setSubmitted({ q: text.trim(), year: year ? Number(year) : null });
   };
 
+  // An item may pin one id per source, so binding leaves the picker open:
+  // a series on two catalogues is named on each before you are done.
   const bind = async (bindProvider: BindingProvider, providerId: string, why?: string) => {
     if (!item) return;
     try {
-      await create.mutateAsync({ library, media_key: item.media_key, provider: bindProvider, provider_id: providerId, note: why || null });
+      const created = await create.mutateAsync({ library, media_key: item.media_key, provider: bindProvider, provider_id: providerId, note: why || null });
+      setPins((prev) => [...prev.filter((p) => p.provider !== bindProvider), created]);
+      setManualId("");
       toast("ok", "Bound", `${item.title} → ${bindProvider}://${providerId}. Applied on the next run.`);
-      onClose();
     } catch (err) {
       toast("fail", "Could not bind", (err as Error).message);
+    }
+  };
+
+  const unpin = async (pin: BindingView) => {
+    if (!item) return;
+    try {
+      await remove.mutateAsync({ library, mediaKey: item.media_key, provider: pin.provider });
+      setPins((prev) => prev.filter((p) => p.provider !== pin.provider));
+      toast("ok", "Unpinned", `${pin.provider}://${pin.provider_id}`);
+    } catch (err) {
+      toast("fail", "Could not unpin", (err as Error).message);
     }
   };
 
@@ -92,7 +118,7 @@ export function BindingPicker({
         <div className="picker">
           <form className="picker__search" onSubmit={search}>
             {providers.length > 1 && (
-              <Segmented name={`${id}-prov`} ariaLabel="Search provider" value={provider} onChange={setProvider} options={providers.map((p) => ({ value: p, label: p }))} />
+              <Segmented name={`${id}-prov`} ariaLabel="Search provider" value={provider} onChange={setPickedSearch} options={providers.map((p) => ({ value: p, label: p }))} />
             )}
             <input className="input" aria-label="Title to search" value={text} onChange={(e) => setText(e.target.value)} placeholder="title…" />
             <input className="input picker__year" aria-label="Year" inputMode="numeric" value={year} onChange={(e) => setYear(e.target.value.replace(/\D/g, "").slice(0, 4))} placeholder="year" />
@@ -156,7 +182,7 @@ export function BindingPicker({
           >
             <div className="label">Or enter an id</div>
             <div className="picker__manual-row">
-              <Segmented name={`${id}-manual`} ariaLabel="Id scheme" value={manualProvider} onChange={setManualProvider} options={schemes.map((p) => ({ value: p, label: p }))} />
+              <Segmented name={`${id}-manual`} ariaLabel="Id scheme" value={manualProvider} onChange={setPickedScheme} options={schemes.map((p) => ({ value: p, label: p }))} />
               <input className="input mono" aria-label="Provider id" value={manualId} onChange={(e) => setManualId(e.target.value)} placeholder="id" />
               <button type="submit" className="button button--ghost" disabled={!manualId.trim() || create.isPending}>
                 Bind
@@ -167,14 +193,33 @@ export function BindingPicker({
             </Field>
           </form>
 
-          {item.binding && (
-            <p className="faint mono">
-              currently bound to {item.binding.provider}://{item.binding.provider_id}
-              {item.binding.note ? ` — ${item.binding.note}` : ""}
-            </p>
+          {pins.length > 0 && (
+            <div className="pins">
+              <div className="label">Pinned ids</div>
+              <ul className="pins__list">
+                {pins.map((pin) => (
+                  <li key={pin.provider} className="pins__row">
+                    <span className="mono">{pin.provider}://{pin.provider_id}</span>
+                    {pin.note && <span className="faint pins__note">{pin.note}</span>}
+                    <button
+                      type="button"
+                      className="iconbtn"
+                      aria-label={`Remove the ${pin.provider} id`}
+                      title={`Remove the ${pin.provider} id`}
+                      onClick={() => void unpin(pin)}
+                      disabled={remove.isPending}
+                    >
+                      <Unlink size={14} aria-hidden="true" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
           <p className="faint">
-            Keyed by <code className="mono">{item.media_key}</code>. The next run resolves this item through the binding instead of its Plex GUID or a title search.
+            Keyed by <code className="mono">{item.media_key}</code>. One id per source: the next
+            run resolves this item through them instead of its Plex GUID or a title search, and a
+            merged library reads the exact record on each.
           </p>
         </div>
       )}

@@ -96,7 +96,7 @@ ProgressFn = Callable[[ItemOutcome], None]
 #: Called once an action knows its scope: (run_id, total items, items to process).
 BeginFn = Callable[[str, int, int], None]
 #: ``media_key -> (provider name, pinned id)``, loaded once per action.
-Bindings = dict[str, tuple[str, ExternalId]]
+Bindings = dict[str, list[ExternalId]]
 
 
 class RunScope:
@@ -414,12 +414,13 @@ class Pipeline:
     ) -> ProviderResult:
         """Try each configured provider in order until one answers."""
         external_ids = await mapper.expand(item.guids)
-        binding = bindings.get(media_key(item))
-        # A binding names an id *scheme* ("anidb"), not a provider. Running it
-        # through the same table a GUID goes through is what lets a pin reach
-        # a source that speaks a different scheme; without it an AniDB pin was
-        # accepted, stored, and then silently ignored at resolve time.
-        pinned = await mapper.expand([binding[1]]) if binding is not None else []
+        # A binding names an id *scheme* ("anidb"), not a provider, and an
+        # item may pin one per source. Running them through the same table a
+        # GUID goes through is what lets a pin reach a source that speaks a
+        # different scheme; without it an AniDB pin was accepted, stored, and
+        # then silently ignored at resolve time.
+        binding = bindings.get(media_key(item)) or []
+        pinned = await mapper.expand(list(binding)) if binding else []
 
         request = LookupRequest(
             title=item.title,

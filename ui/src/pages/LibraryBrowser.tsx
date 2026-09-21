@@ -82,8 +82,10 @@ export default function LibraryBrowser() {
 
   const onUnbind = async (item: ItemView) => {
     const ok = await confirm({
-      title: `Remove the binding on ${item.title}?`,
-      body: "Its cached match goes with it; the next run resolves it again from the Plex GUID or by title.",
+      title: item.bindings.length > 1
+        ? `Remove all ${item.bindings.length} pinned ids on ${item.title}?`
+        : `Remove the binding on ${item.title}?`,
+      body: "The cached match goes with them; the next run resolves the item again from the Plex GUID or by title. To drop just one id, open the picker.",
       confirmLabel: "Remove binding",
       danger: true,
     });
@@ -196,7 +198,9 @@ function ItemRow({ item, onBind, onUnbind, onForget, busy }: { item: ItemView; o
         <div className="item__line">
           <span className={`match match--${match}`} title={item.guids.join(", ") || "no external ids"}>
             <MatchIcon size={12} aria-hidden="true" /> {matchLabel}
-            {match === "binding" && item.binding && <span> · {item.binding.provider}://{item.binding.provider_id}</span>}
+            {match === "binding" && item.bindings.map((b) => (
+              <span key={b.provider}> · {b.provider}://{b.provider_id}</span>
+            ))}
             {match !== "binding" && state?.provider && <span> · {state.provider}:{state.provider_id}</span>}
           </span>
           {state ? (
@@ -219,7 +223,7 @@ function ItemRow({ item, onBind, onUnbind, onForget, busy }: { item: ItemView; o
             <RotateCcw size={15} aria-hidden="true" />
           </button>
         )}
-        {item.binding ? (
+        {item.bindings.length > 0 ? (
           <button type="button" className="button button--ghost button--sm" onClick={onUnbind} disabled={busy}>
             <Unlink size={12} aria-hidden="true" /> Unbind
           </button>

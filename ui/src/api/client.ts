@@ -125,8 +125,9 @@ export const api = {
       limit: params.limit,
     }),
   createBinding: (body: BindingIn) => send<BindingView>("POST", "/api/v1/bindings", body),
-  deleteBinding: (library: string, mediaKey: string) =>
-    send<{ removed: boolean }>("DELETE", `/api/v1/bindings?library=${encodeURIComponent(library)}&media_key=${encodeURIComponent(mediaKey)}`, undefined),
+  /** Without `provider`, every id pinned on the item goes. */
+  deleteBinding: (library: string, mediaKey: string, provider?: string) =>
+    send<{ removed: boolean }>("DELETE", `/api/v1/bindings?library=${encodeURIComponent(library)}&media_key=${encodeURIComponent(mediaKey)}${provider ? `&provider=${encodeURIComponent(provider)}` : ""}`, undefined),
   thumbUrl: (path: string | null) => (path ? `/api/v1/plex/thumb?path=${encodeURIComponent(path)}` : null),
   validateConfig: (doc: ConfigDocument) => send<ValidationResult>("POST", "/api/v1/config/validate", doc),
   saveConfig: (doc: ConfigDocument, etag: string | null) =>
@@ -417,7 +418,8 @@ export function useCreateBinding() {
 export function useDeleteBinding() {
   const invalidate = useInvalidateItems();
   return useMutation({
-    mutationFn: ({ library, mediaKey }: { library: string; mediaKey: string }) => api.deleteBinding(library, mediaKey),
+    mutationFn: ({ library, mediaKey, provider }: { library: string; mediaKey: string; provider?: string }) =>
+      api.deleteBinding(library, mediaKey, provider),
     onSuccess: invalidate,
   });
 }

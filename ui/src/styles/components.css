@@ -1465,3 +1465,38 @@ a.tape__cell:focus-visible {
     display: none;   /* the rail has the labelled button */
   }
 }
+
+/* Pinned ids in the binding picker: one row per source, each removable. */
+.pins {
+  margin-top: 18px;
+}
+
+.pins__list {
+  display: grid;
+  gap: 6px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.pins__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--surface-2, transparent);
+}
+
+.pins__note {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pins__row .iconbtn {
+  margin-left: auto;
+}

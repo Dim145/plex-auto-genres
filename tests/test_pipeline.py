@@ -795,3 +795,27 @@ async def test_merge_mode_leaves_a_pinned_title_to_the_source_that_was_pinned(st
 
     assert report.written == 1 and handle.last_tags == ["Psychological"]
     assert not tmdb_search.called, "TMDB cannot read a MAL id, so it is not asked"
+
+
+@respx.mock
+async def test_two_pinned_ids_let_a_merge_use_both_catalogues(store: Store):
+    """The case one pin per item could not express: a series that exists on
+    AniList and on TMDB, merged from the exact record on each."""
+    respx.post("https://graphql.anilist.co").mock(return_value=anilist_ok(("Drama",)))
+    respx.get("https://api.themoviedb.org/3/tv/7").mock(
+        return_value=httpx.Response(200, json={
+            "id": 7, "name": "Anime", "genres": [{"name": "Animation"}]})
+    )
+    searches = respx.get("https://api.themoviedb.org/3/search/tv")
+
+    handle = guid_item()
+    store.set_binding("Animes", "mal://1", "anilist", "21")
+    store.set_binding("Animes", "mal://1", "tmdb", "7")
+    config = make_config(tmdb_key="k", providers=["anilist", "tmdb"],
+                         providerMode="merge", clearGenres=True)
+
+    report = await Pipeline(config, store, FakeServer([handle])).tag_library(config.libraries[0])
+
+    assert report.written == 1 and handle.last_tags == ["Drama", "Animation"]
+    assert not searches.called, "each source was asked by the id it was handed"
+    assert store.get_state("Animes", "mal://1").provider == "anilist+tmdb"

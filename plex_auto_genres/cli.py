@@ -96,9 +96,11 @@ def build_parser() -> argparse.ArgumentParser:
     bind.add_argument("provider_id")
     bind.add_argument("--note", help="Free-text reminder of why this binding exists.")
 
-    unbind = sub.add_parser("unbind", help="Remove a manual binding.")
+    unbind = sub.add_parser("unbind", help="Remove an item's manual bindings.")
     unbind.add_argument("library")
     unbind.add_argument("title")
+    unbind.add_argument("--provider", choices=["tmdb", "mal", "anilist", "anidb", "tvdb", "imdb"],
+                        help="Remove just this source's id, leaving the others.")
 
     bindings = sub.add_parser("bindings", help="List manual bindings.")
     bindings.add_argument("--library")
@@ -336,6 +338,10 @@ def cmd_bind(args, config: AppConfig, store: Store, style: Style) -> int:
         f"{style.green('bound')} {style.bold(args.title)} in {library} "
         f"-> {args.provider}://{args.provider_id}"
     )
+    pinned = store.get_bindings(library, args.title)
+    if len(pinned) > 1:
+        print(style.dim(f"  now pinned on {len(pinned)} sources: "
+                        f"{', '.join(str(e) for e in pinned)}"))
     print(style.dim("  Its cache entry was cleared; the next run will use this id."))
     return 0
 
@@ -343,10 +349,15 @@ def cmd_bind(args, config: AppConfig, store: Store, style: Style) -> int:
 def cmd_unbind(args, config: AppConfig, store: Store, style: Style) -> int:
     """Remove a manual binding."""
     library = _library_name(config, args.library)
-    if store.delete_binding(library, args.title):
-        print(f"{style.green('removed')} binding for {args.title} in {library}")
+    if store.delete_binding(library, args.title, args.provider):
+        what = f"{args.provider} id" if args.provider else "bindings"
+        print(f"{style.green('removed')} {what} for {args.title} in {library}")
+        remaining = store.get_bindings(library, args.title)
+        if remaining:
+            print(style.dim(f"  still pinned: {', '.join(str(e) for e in remaining)}"))
         return 0
-    print(style.yellow(f"No binding for {args.title!r} in {library!r}."))
+    which = f" for {args.provider}" if args.provider else ""
+    print(style.yellow(f"No binding{which} on {args.title!r} in {library!r}."))
     return 1
 
 

@@ -77,9 +77,21 @@ def test_force_overrides_everything(store: Store):
 
 def test_binding_round_trip(store: Store):
     store.set_binding("Animes", "Monster", "mal", "19", note="wrong auto-match")
-    provider, external = store.get_binding("Animes", "Monster")
-    assert provider == "mal"
-    assert external == ExternalId("mal", "19")
+    assert store.get_bindings("Animes", "Monster") == [ExternalId("mal", "19")]
+
+
+def test_an_item_pins_one_id_per_source(store: Store):
+    """A series on two catalogues needs both ids to be merged from both."""
+    store.set_binding("Animes", "Monster", "mal", "19")
+    store.set_binding("Animes", "Monster", "tmdb", "7")
+    assert store.get_bindings("Animes", "Monster") == [
+        ExternalId("mal", "19"), ExternalId("tmdb", "7")
+    ]
+
+    store.set_binding("Animes", "Monster", "tmdb", "8")
+    assert store.get_bindings("Animes", "Monster") == [
+        ExternalId("mal", "19"), ExternalId("tmdb", "8")
+    ], "setting a source again replaces that pin alone"
 
 
 def test_setting_a_binding_invalidates_the_cached_match(store: Store):
@@ -93,7 +105,37 @@ def test_delete_binding(store: Store):
     store.set_binding("Animes", "Monster", "mal", "19")
     assert store.delete_binding("Animes", "Monster") is True
     assert store.delete_binding("Animes", "Monster") is False
-    assert store.get_binding("Animes", "Monster") is None
+    assert store.get_bindings("Animes", "Monster") == []
+
+
+def test_one_pin_can_be_removed_without_the_others(store: Store):
+    store.set_binding("Animes", "Monster", "mal", "19")
+    store.set_binding("Animes", "Monster", "tmdb", "7")
+    assert store.delete_binding("Animes", "Monster", "tmdb") is True
+    assert store.get_bindings("Animes", "Monster") == [ExternalId("mal", "19")]
+
+
+def test_an_older_database_keeps_its_bindings_when_the_table_is_widened(tmp_path):
+    """The old key allowed one pin per item, so it cannot simply be replaced."""
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    legacy = sqlite3.connect(path)
+    legacy.executescript(
+        "CREATE TABLE bindings (library TEXT NOT NULL, media_key TEXT NOT NULL, "
+        "provider TEXT NOT NULL, provider_id TEXT NOT NULL, note TEXT, "
+        "created_at REAL NOT NULL, PRIMARY KEY (library, media_key));"
+        "INSERT INTO bindings VALUES ('Animes','mal://1','mal','19','why',1.0);"
+    )
+    legacy.commit()
+    legacy.close()
+
+    store = Store(path)
+    assert store.get_bindings("Animes", "mal://1") == [ExternalId("mal", "19")]
+    assert store.list_bindings("Animes")[0]["note"] == "why"
+    store.set_binding("Animes", "mal://1", "tmdb", "7")
+    assert len(store.get_bindings("Animes", "mal://1")) == 2
+    store.close()
 
 
 # -- runs and snapshots ----------------------------------------------------

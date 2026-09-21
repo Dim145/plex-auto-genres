@@ -169,6 +169,16 @@ plex-auto-genres bind Animes "Monster" mal 19     # pin it; clears the cached ma
 plex-auto-genres run --library Animes
 ```
 
+An item can pin **one id per source**, which is what a merged library needs: a series
+that exists on both AniList and TMDB names its id on each, and each source is then
+asked for the exact record rather than searching by title.
+
+```bash
+plex-auto-genres bind Animes "Monster" anilist 21    # add a second id
+plex-auto-genres unbind Animes "Monster" --provider anilist   # drop just that one
+plex-auto-genres unbind Animes "Monster"             # drop them all
+```
+
 A binding names an **id scheme**, not a provider, and only a scheme one of the
 library's sources can read is accepted:
 

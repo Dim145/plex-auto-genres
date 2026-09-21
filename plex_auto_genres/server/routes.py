@@ -474,10 +474,9 @@ async def library_items(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     states = state.store.states_for_library(entry.library)
-    bound = {
-        row["media_key"]: schemas.BindingView(**dict(row))
-        for row in state.store.list_bindings(entry.library)
-    }
+    bound: dict[str, list[schemas.BindingView]] = {}
+    for row in state.store.list_bindings(entry.library):
+        bound.setdefault(row["media_key"], []).append(schemas.BindingView(**dict(row)))
 
     def classify(item: MediaItem) -> tuple[str, str]:
         key = media_key(item)
@@ -514,7 +513,7 @@ async def library_items(
             thumb=item.thumb,
             guids=[str(g) for g in item.guids],
             match=_match_source(item, entry, key in bound, cached),  # type: ignore[arg-type]
-            binding=bound.get(key),
+            bindings=bound.get(key, []),
             state=schemas.ItemState(
                 status=cached.status,  # type: ignore[arg-type]
                 provider=cached.provider,
@@ -614,20 +613,26 @@ async def create_binding(request: Request, body: schemas.BindingIn) -> schemas.B
     state.store.set_binding(
         entry.library, body.media_key, body.provider, body.provider_id, body.note
     )
+    # An item holds one pin per source, so the row to return is the one that
+    # names *this* source; matching on the item alone gave back its first pin.
     row = next(
-        r for r in state.store.list_bindings(entry.library) if r["media_key"] == body.media_key
+        r for r in state.store.list_bindings(entry.library)
+        if r["media_key"] == body.media_key and r["provider"] == body.provider
     )
     return schemas.BindingView(**dict(row))
 
 
 @router.delete("/bindings", status_code=200)
 async def delete_binding(
-    request: Request, library: str, media_key_: str = Query(alias="media_key")
+    request: Request,
+    library: str,
+    media_key_: str = Query(alias="media_key"),
+    provider: str | None = Query(default=None, description="Remove just this source's pin."),
 ) -> dict:
-    """Remove a binding; the item's cached match goes with it."""
+    """Remove an item's pins, or just one source's; its cached match goes too."""
     state = _state(request)
     canonical = _canonical_library(state, library) or library
-    removed = state.store.delete_binding(canonical, media_key_)
+    removed = state.store.delete_binding(canonical, media_key_, provider)
     if not removed:
         raise HTTPException(status_code=404, detail="No such binding.")
     return {"removed": True}

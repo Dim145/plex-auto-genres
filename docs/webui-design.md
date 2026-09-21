@@ -613,6 +613,26 @@ Three requests from a library in use, all of them about what ends up written:
   different words across languages still need a `replace` line, which is now the one
   documented way to make a localized TMDB agree with the English-only anime sources.
 
+### One binding per source — done
+
+Bindings were keyed `(library, media_key)`, so an item held exactly one pinned id and
+naming a second replaced the first. That was tolerable while resolution stopped at the
+first source that answered; with `providerMode: merge` it is the wrong shape, because a
+series on two catalogues can only contribute from one of them.
+
+The key is now `(library, media_key, provider)`. SQLite cannot alter a primary key, so
+the table is rebuilt in place on first open, keeping the rows and their notes. Almost
+nothing above the store had to change: `LookupRequest.pinned` became a list when AniDB
+pins started being translated, and each provider already takes the id it can read, so
+several pins simply arrive as a longer list.
+
+Around it: `delete_binding` takes an optional source, and so do the API and `unbind`;
+the picker lists what is pinned with a remove control per row and stays open after a
+bind, since naming a second id is the point. Two bugs this surfaced, both found by
+driving the real console: the create route echoed back the item's *first* pin rather
+than the one just made, and the picker froze its id-scheme choice at mount, before the
+list of allowed schemes had arrived from the API.
+
 ### Next
 
 Decide where secrets should live if they are ever to be edited from the UI — the

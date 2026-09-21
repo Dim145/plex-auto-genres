@@ -272,7 +272,8 @@ class ItemView(BaseModel):
     thumb: str | None = Field(default=None, description="Proxied poster path, or null.")
     guids: list[str] = Field(default_factory=list)
     match: MatchSource
-    binding: BindingView | None = None
+    #: Every id pinned on this item: one per source at most.
+    bindings: list[BindingView] = Field(default_factory=list)
     state: ItemState | None = None
     current_genres: list[str] = Field(default_factory=list)
     current_collections: list[str] = Field(default_factory=list)

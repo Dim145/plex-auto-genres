@@ -7,7 +7,7 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
-from plex_auto_genres.models import MediaType
+from plex_auto_genres.models import ExternalId, MediaType
 from plex_auto_genres.providers.anilist import AniListProvider
 from plex_auto_genres.providers.base import HttpTransport, LookupRequest, rank_candidates, short
 from plex_auto_genres.providers.jikan import JikanProvider
@@ -159,7 +159,8 @@ def test_items_page_joins_match_state_and_bindings(browser):
     assert one["current_genres"] == ["Old"]
 
     two = by_title["Two"]
-    assert two["match"] == "binding" and two["binding"]["provider_id"] == "19"
+    assert two["match"] == "binding"
+    assert [b["provider_id"] for b in two["bindings"]] == ["19"]
     assert two["state"]["status"] == "failed" and "no anime" in two["state"]["last_error"]
 
     loose = by_title["Loose Cannon"]
@@ -310,3 +311,28 @@ def test_match_provenance_comes_from_the_run_that_resolved_the_item(browser):
                          genres=["Action"], provider="jikan", provider_id="1", source="search")
     by_title = {i["title"]: i for i in c.get("/api/v1/libraries/Animes/items").json()["items"]}
     assert by_title["One"]["match"] == "search", "what happened, not what the GUID suggests"
+
+
+def test_an_item_can_pin_one_id_per_source(browser):
+    """A title known to two catalogues names its id on each, and both are listed."""
+    c, _, store = browser
+    for provider, provider_id in (("mal", "19"), ("anidb", "4521")):
+        created = c.post("/api/v1/bindings", json={
+            "library": "Animes", "media_key": "mal://2",
+            "provider": provider, "provider_id": provider_id,
+        })
+        assert created.status_code == 201
+        # The row echoed back must be the pin just made, not the item's first.
+        assert created.json()["provider"] == provider
+        assert created.json()["provider_id"] == provider_id
+
+    item = next(i for i in c.get("/api/v1/libraries/Animes/items").json()["items"]
+                if i["media_key"] == "mal://2")
+    assert [(b["provider"], b["provider_id"]) for b in item["bindings"]] == [
+        ("mal", "19"), ("anidb", "4521")
+    ]
+
+    dropped = c.request("DELETE", "/api/v1/bindings",
+                        params={"library": "Animes", "media_key": "mal://2", "provider": "anidb"})
+    assert dropped.status_code == 200
+    assert store.get_bindings("Animes", "mal://2") == [ExternalId("mal", "19")]

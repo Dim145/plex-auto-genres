@@ -15,6 +15,7 @@ the data layer a web UI will need:
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 import time
@@ -26,7 +27,9 @@ from pathlib import Path
 
 from .models import ExternalId, RunReport
 
-SCHEMA_VERSION = 2
+log = logging.getLogger(__name__)
+
+SCHEMA_VERSION = 3
 
 #: Columns added after the first release, applied with ALTER TABLE on open.
 _ADDED_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
@@ -72,7 +75,9 @@ CREATE TABLE IF NOT EXISTS bindings (
     provider_id TEXT NOT NULL,
     note        TEXT,
     created_at  REAL NOT NULL,
-    PRIMARY KEY (library, media_key)
+    -- One pin per source per item: a series that exists on both TMDB and
+    -- AniList can name its id on each, which a merged library then uses.
+    PRIMARY KEY (library, media_key, provider)
 );
 
 CREATE TABLE IF NOT EXISTS snapshots (
@@ -212,7 +217,8 @@ class Store:
         self._conn.commit()
 
     def _migrate(self) -> None:
-        """Add columns introduced after schema version 1 to an older database."""
+        """Bring an older database up to the current schema."""
+        self._widen_bindings()
         for table, columns in _ADDED_COLUMNS.items():
             existing = {
                 row["name"] for row in self._conn.execute(f"PRAGMA table_info({table})")
@@ -222,6 +228,35 @@ class Store:
                     # Table and column names come from the constant above, not from input.
                     statement = f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"  # nosec B608
                     self._conn.execute(statement)
+
+    def _widen_bindings(self) -> None:
+        """Let one item hold a pinned id per source.
+
+        SQLite cannot alter a primary key, so the table is rebuilt in place.
+        Under the old key, pinning an AniList id silently replaced the TMDB
+        one -- which is the pair a merged library most wants to keep.
+        """
+        columns = self._conn.execute("PRAGMA table_info(bindings)").fetchall()
+        if not columns or any(c["name"] == "provider" and c["pk"] for c in columns):
+            return
+        self._conn.executescript(
+            """
+            CREATE TABLE bindings_widened (
+                library     TEXT NOT NULL,
+                media_key   TEXT NOT NULL,
+                provider    TEXT NOT NULL,
+                provider_id TEXT NOT NULL,
+                note        TEXT,
+                created_at  REAL NOT NULL,
+                PRIMARY KEY (library, media_key, provider)
+            );
+            INSERT INTO bindings_widened
+                SELECT library, media_key, provider, provider_id, note, created_at FROM bindings;
+            DROP TABLE bindings;
+            ALTER TABLE bindings_widened RENAME TO bindings;
+            """
+        )
+        log.info("Bindings widened: an item can now pin one id per source.")
 
     def close(self) -> None:
         with self._lock:
@@ -457,14 +492,18 @@ class Store:
         provider_id: str,
         note: str | None = None,
     ) -> None:
-        """Pin an item to a provider id, overriding automatic matching."""
+        """Pin an item to one source's id, overriding automatic matching.
+
+        An item may hold one pin per source; setting the same source again
+        replaces that pin alone.
+        """
         with self._tx() as conn:
             conn.execute(
                 "INSERT INTO bindings "
                 "(library, media_key, provider, provider_id, note, created_at) "
                 "VALUES (?,?,?,?,?,?) "
-                "ON CONFLICT(library, media_key) DO UPDATE SET "
-                "provider=excluded.provider, provider_id=excluded.provider_id, "
+                "ON CONFLICT(library, media_key, provider) DO UPDATE SET "
+                "provider_id=excluded.provider_id, "
                 "note=excluded.note, created_at=excluded.created_at",
                 (library, media_key, provider, provider_id, note, time.time()),
             )
@@ -473,27 +512,33 @@ class Store:
                 "DELETE FROM media_state WHERE library = ? AND media_key = ?", (library, media_key)
             )
 
-    def get_binding(self, library: str, media_key: str) -> tuple[str, ExternalId] | None:
-        """The manual binding for an item, as ``(provider, id)``."""
+    def get_bindings(self, library: str, media_key: str) -> list[ExternalId]:
+        """Every id pinned on an item, oldest first."""
         with self._read() as conn:
-            row = conn.execute(
-                "SELECT provider, provider_id FROM bindings WHERE library = ? AND media_key = ?",
+            rows = conn.execute(
+                "SELECT provider, provider_id FROM bindings "
+                "WHERE library = ? AND media_key = ? ORDER BY created_at, provider",
                 (library, media_key),
-            ).fetchone()
-        if row is None:
-            return None
-        return row["provider"], ExternalId(row["provider"], row["provider_id"])
+            ).fetchall()
+        return [ExternalId(r["provider"], r["provider_id"]) for r in rows]
 
-    def delete_binding(self, library: str, media_key: str) -> bool:
-        """Remove a binding. Returns whether one existed.
+    def delete_binding(self, library: str, media_key: str, provider: str | None = None) -> bool:
+        """Remove an item's pins, or just the one naming ``provider``.
 
-        The cached match was produced *through* the binding, so it goes too;
-        the next run re-resolves the item from its GUID or by search.
+        A cached match produced *through* a binding goes with it; the next run
+        re-resolves the item from what pins remain, its GUID, or a search.
         """
         with self._tx() as conn:
-            cur = conn.execute(
-                "DELETE FROM bindings WHERE library = ? AND media_key = ?", (library, media_key)
-            )
+            if provider is None:
+                cur = conn.execute(
+                    "DELETE FROM bindings WHERE library = ? AND media_key = ?",
+                    (library, media_key),
+                )
+            else:
+                cur = conn.execute(
+                    "DELETE FROM bindings WHERE library = ? AND media_key = ? AND provider = ?",
+                    (library, media_key, provider),
+                )
             if cur.rowcount:
                 conn.execute(
                     "DELETE FROM media_state WHERE library = ? AND media_key = ?",
@@ -501,21 +546,27 @@ class Store:
                 )
         return cur.rowcount > 0
 
-    def bindings_for_library(self, library: str) -> dict[str, tuple[str, ExternalId]]:
-        """``media_key -> (provider, id)`` for every binding of a library. One query."""
-        return {
-            row["media_key"]: (row["provider"], ExternalId(row["provider"], row["provider_id"]))
-            for row in self.list_bindings(library)
-        }
+    def bindings_for_library(self, library: str) -> dict[str, list[ExternalId]]:
+        """``media_key -> pinned ids`` for a whole library. One query."""
+        out: dict[str, list[ExternalId]] = {}
+        for row in self.list_bindings(library):
+            out.setdefault(row["media_key"], []).append(
+                ExternalId(row["provider"], row["provider_id"])
+            )
+        return out
 
     def list_bindings(self, library: str | None = None) -> list[sqlite3.Row]:
         """Every binding, optionally narrowed to one library."""
         with self._read() as conn:
             if library:
                 return conn.execute(
-                    "SELECT * FROM bindings WHERE library = ? ORDER BY media_key", (library,)
+                    "SELECT * FROM bindings WHERE library = ? "
+                    "ORDER BY media_key, created_at, provider",
+                    (library,),
                 ).fetchall()
-            return conn.execute("SELECT * FROM bindings ORDER BY library, media_key").fetchall()
+            return conn.execute(
+                "SELECT * FROM bindings ORDER BY library, media_key, created_at, provider"
+            ).fetchall()
 
     # -- runs and undo ----------------------------------------------------
 

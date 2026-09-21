@@ -282,7 +282,8 @@ export interface ItemView {
   thumb: string | null;
   guids: string[];
   match: MatchSource;
-  binding: BindingView | null;
+  /** Every id pinned on this item: one per source at most. */
+  bindings: BindingView[];
   state: ItemState | null;
   current_genres: string[];
   current_collections: string[];
