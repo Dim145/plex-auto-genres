@@ -57,6 +57,9 @@ class AniListProvider(Provider):
     supports = (MediaType.ANIME,)
     #: Its community tags are the finer vocabulary useKeywords asks for.
     has_keywords = True
+    #: It reports what it is serving right now, per minute, and that figure
+    #: has been a third of the documented one for a long time.
+    limit_window = 60.0
 
     async def _graphql(self, query: str, variables: dict) -> dict:
         response = await self.transport.request(

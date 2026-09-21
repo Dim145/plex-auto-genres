@@ -548,20 +548,46 @@ async def test_anilist_returns_its_tags_instead_of_its_genres_for_keywords():
 
 @respx.mock
 async def test_the_transport_paces_itself_from_the_advertised_limit():
-    """The header is how a degraded provider tells you to slow down before it
+    """The header is how a degraded provider says to slow down before it
     starts refusing: AniList reports 30 while its documentation says 90."""
     limiter = LimitSpec(((90, 60.0),)).build()
+    respx.post("https://graphql.anilist.co").mock(
+        return_value=httpx.Response(200, headers={"X-RateLimit-Limit": "30"}, json={
+            "data": {"Media": {"id": 1, "idMal": 1, "title": {"romaji": "A"},
+                               "genres": ["Action"], "tags": [], "averageScore": 80,
+                               "startDate": {"year": 1998},
+                               "siteUrl": "https://anilist.co/anime/1"}}})
+    )
+    provider = AniListProvider(HttpTransport(
+        httpx.AsyncClient(), limiter, max_attempts=1, name="anilist",
+        limit_window=AniListProvider.limit_window,
+    ))
+    await provider.fetch_by_id(
+        ExternalId("anilist", "1"), LookupRequest("x", None, MediaType.ANIME)
+    )
+
+    # The stock is now five seconds of 30 a minute, not of 90.
+    await asyncio.gather(*(limiter.acquire() for _ in range(2)))
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(limiter.acquire(), timeout=0.3)
+
+
+@respx.mock
+async def test_a_header_from_a_source_that_never_sends_one_is_ignored():
+    """A bare number in a header says nothing about the window it counts over.
+    Jikan and TMDB publish their limits and send nothing, so anything that
+    turns up under that name is not theirs to be trusted."""
+    limiter = LimitSpec(((90, 60.0),)).build()
     respx.get("https://api.jikan.moe/v4/anime/1").mock(
-        return_value=httpx.Response(200, headers={"X-RateLimit-Limit": "30"},
+        return_value=httpx.Response(200, headers={"X-RateLimit-Limit": "3"},
                                     json={"data": {"mal_id": 1, "title": "A", "score": 8.0,
                                                    "genres": [{"name": "Action"}]}})
     )
     provider = JikanProvider(
         HttpTransport(httpx.AsyncClient(), limiter, max_attempts=1, name="jikan")
     )
+    assert JikanProvider.limit_window is None
     await provider.fetch_by_id(ExternalId("mal", "1"), LookupRequest("x", None, MediaType.ANIME))
 
-    # The stock is now five seconds of 30 a minute, not of 90.
-    await asyncio.gather(*(limiter.acquire() for _ in range(2)))
-    with pytest.raises(asyncio.TimeoutError):
-        await asyncio.wait_for(limiter.acquire(), timeout=0.3)
+    # Untouched: five seconds of 90 a minute is seven in stock, one spent.
+    await asyncio.gather(*(limiter.acquire() for _ in range(6)))

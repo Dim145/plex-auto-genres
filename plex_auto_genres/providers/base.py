@@ -76,11 +76,18 @@ class HttpTransport:
         *,
         max_attempts: int = 3,
         name: str = "provider",
+        limit_window: float | None = None,
     ) -> None:
         self._client = client
         self._limiter = limiter
         self._max_attempts = max_attempts
         self._name = name
+        #: Seconds the provider's X-RateLimit-Limit header counts over, when
+        #: it sends one and says what it means. None: do not read it. A bare
+        #: number in a header is not self-describing, and reading AniList's
+        #: "per minute" as another service's "per ten seconds" would pace us
+        #: six times too fast at exactly the wrong moment.
+        self._limit_window = limit_window
         self.request_count = 0
 
     async def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
@@ -102,7 +109,8 @@ class HttpTransport:
                 await self._sleep_backoff(attempt)
                 continue
 
-            _observe_rate_limit(response, self._limiter)
+            if self._limit_window is not None:
+                _observe_rate_limit(response, self._limiter, self._limit_window)
 
             if response.status_code == 429:
                 asked = _parse_retry_after(response)
@@ -159,13 +167,15 @@ class HttpTransport:
         await asyncio.sleep(random.uniform(low, high))  # nosec B311
 
 
-def _observe_rate_limit(response: httpx.Response, limiter: CompositeLimiter) -> None:
-    """Adopt the per-minute allowance a provider advertises on its responses."""
+def _observe_rate_limit(
+    response: httpx.Response, limiter: CompositeLimiter, window: float
+) -> None:
+    """Adopt the allowance a provider advertises on its own responses."""
     raw = response.headers.get("X-RateLimit-Limit")
     if not raw:
         return
     try:
-        limiter.observe_limit(float(raw))
+        limiter.observe_limit(float(raw), window)
     except ValueError:
         log.debug("unreadable X-RateLimit-Limit: %r", raw)
 
@@ -196,6 +206,10 @@ class Provider(abc.ABC):
     #: MyAnimeList has none -- its themes and demographics are already folded
     #: into the genres it returns.
     has_keywords: bool = False
+    #: Seconds this source's ``X-RateLimit-Limit`` header counts over, when it
+    #: sends one. None for the sources that send none: Jikan and TMDB publish
+    #: their limits and say nothing on the wire.
+    limit_window: float | None = None
     #: Library types this provider can serve.
     supports: tuple[MediaType, ...] = ()
 

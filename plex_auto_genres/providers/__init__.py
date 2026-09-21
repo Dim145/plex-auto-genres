@@ -197,6 +197,7 @@ def build_providers(
         transport = HttpTransport(
             client, shared_limiter(name, _LIMITS[name]),
             max_attempts=settings.max_attempts, name=name,
+            limit_window=_CLASSES[name].limit_window,
         )
         if name == "tmdb":
             built.append(

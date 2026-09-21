@@ -205,8 +205,11 @@ failure earns.
 Four things keep a bad day from becoming a bad library:
 
 - Each source is paced at what it says it is serving, not at what it published.
-  A provider that reports `X-RateLimit-Limit` on its responses is taken at its
-  word, and the pacing follows it up or down without waiting for a release.
+  A source that reports `X-RateLimit-Limit`, and documents the window that
+  figure counts over, is taken at its word, and the pacing follows it up or
+  down without waiting for a release. Of the three, only AniList sends one:
+  Jikan and TMDB publish their limits and say nothing on the wire, so those
+  stay at the published figures.
 
 - Requests are paced to a few seconds' worth of each published limit at a time,
   rather than spending a whole minute's allowance in its first seconds.

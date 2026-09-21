@@ -649,6 +649,23 @@ starts at what AniList serves today, and every response's `X-RateLimit-Limit` re
 the minute bucket, up or down. A restored AniList speeds back up on its first answer,
 with no release and no configuration.
 
+### The other two sources, checked — done
+
+Asked to give Jikan and TMDB the same treatment. Verified against both live endpoints
+and their documentation rather than from memory: neither sends a rate-limit header.
+Jikan answers with cache headers alone and documents 3/s and 60/min, exactly what we
+pace at; TMDB retired its 40-per-10s cap in 2019 and now documents "somewhere in the 40
+requests per second range" with no header and an instruction to respect the 429, which
+the transport already does. So there was nothing to adapt for them, and their published
+figures are right.
+
+What the check did change is the shape of the mechanism. Reading any header called
+`X-RateLimit-Limit` and assuming it counts per minute is a guess: the same name over ten
+seconds would pace us six times too fast, at exactly the moment a service is asking for
+less. A source now declares the window its header counts over, `limit_window`, and the
+transport reads the header only for a source that has said what it means. AniList
+declares sixty seconds; the other two declare nothing and are left alone.
+
 ### Next
 
 Decide where secrets should live if they are ever to be edited from the UI — the

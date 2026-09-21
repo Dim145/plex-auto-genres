@@ -139,11 +139,11 @@ class CompositeLimiter:
         if self._streak:
             self._streak -= 1
 
-    def observe_limit(self, per_minute: float) -> None:
-        """Take the provider at its word about how many requests a minute."""
+    def observe_limit(self, allowance: float, window: float = 60.0) -> None:
+        """Take the provider at its word about its own allowance per window."""
         for bucket in self._buckets:
-            if bucket.period == 60.0:
-                bucket.retune(per_minute)
+            if bucket.period == window:
+                bucket.retune(allowance)
 
 
 #: How much of a long window may be spent in one go. Handing out a whole
@@ -193,7 +193,10 @@ def shared_limiter(name: str, spec: LimitSpec) -> CompositeLimiter:
     return limiter
 
 
-#: https://docs.api.jikan.moe/#section/Information/Rate-Limiting -- 3/s, 60/min.
+#: https://docs.api.jikan.moe/#section/Information/Rate-Limiting -- 3/s, 60/min,
+#: and no rate-limit header on the wire, so these figures are all there is.
+#: Jikan's own note is worth remembering when it refuses anyway: "It's still
+#: possible to get rate limited from MyAnimeList.net instead."
 JIKAN_LIMITS = LimitSpec(((3, 1.0), (60, 60.0)))
 #: https://docs.anilist.co/guide/rate-limiting -- 90/min on paper, but the API
 #: has been "in a degraded state" and serving 30 for a long time, which is what
@@ -201,5 +204,8 @@ JIKAN_LIMITS = LimitSpec(((3, 1.0), (60, 60.0)))
 #: transport reads that header and retunes if the real figure differs, so a
 #: restored AniList speeds back up without waiting for a release.
 ANILIST_LIMITS = LimitSpec(((30, 60.0),))
-#: TMDB removed its hard cap but still throttles; ~40/s is comfortably safe.
+#: https://developer.themoviedb.org/docs/rate-limiting -- the old 40-per-10s
+#: cap was retired in 2019 and what remains is "somewhere in the 40 requests
+#: per second range", with no header to read and an instruction to respect the
+#: 429, which the transport does.
 TMDB_LIMITS = LimitSpec(((40, 1.0),))
