@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "plex-auto-genres"
-version = "2.1.0"
+version = "2.1.1"
 description = "Automatically tag Plex media with genres from TMDB, MyAnimeList or AniList."
 readme = "README.md"
 requires-python = ">=3.11"
