@@ -55,6 +55,8 @@ class AniListProvider(Provider):
     name = "anilist"
     guid_schemes = ("anilist", "mal")
     supports = (MediaType.ANIME,)
+    #: Its community tags are the finer vocabulary useKeywords asks for.
+    has_keywords = True
 
     async def _graphql(self, query: str, variables: dict) -> dict:
         response = await self.transport.request(
@@ -78,7 +80,7 @@ class AniListProvider(Provider):
         media = data.get("Media")
         if not media:
             raise ProviderNotFound(f"anilist: nothing for {external_id}")
-        return self._to_result(media)
+        return self._to_result(media, request)
 
     async def search(self, request: LookupRequest) -> ProviderResult:
         from .jikan import clean_anime_title
@@ -102,7 +104,7 @@ class AniListProvider(Provider):
         best = pick_best(candidates, title, request.year)
         if best is None:
             raise ProviderNotFound(f"anilist: no anime matching {title!r}")
-        return self._to_result(best)
+        return self._to_result(best, request)
 
     async def search_candidates(self, request: LookupRequest, limit: int = 8) -> list[Candidate]:
         from .jikan import clean_anime_title
@@ -131,13 +133,18 @@ class AniListProvider(Provider):
             ))
         return out
 
-    def _to_result(self, media: dict) -> ProviderResult:
-        genres = list(media.get("genres") or [])
-        for tag in media.get("tags") or []:
-            if tag.get("isGeneralSpoiler"):
-                continue
-            if (tag.get("rank") or 0) >= TAG_RANK_THRESHOLD and tag.get("name"):
-                genres.append(tag["name"])
+    def _to_result(self, media: dict, request: LookupRequest) -> ProviderResult:
+        tags = [
+            tag["name"]
+            for tag in media.get("tags") or []
+            if tag.get("name")
+            and not tag.get("isGeneralSpoiler")
+            and (tag.get("rank") or 0) >= TAG_RANK_THRESHOLD
+        ]
+        # AniList's genre list is a dozen broad buckets, and for a whole
+        # library it says little. useKeywords takes the tags on their own;
+        # otherwise they are added to the genres, as before.
+        genres = tags if request.use_keywords else [*(media.get("genres") or []), *tags]
 
         return ProviderResult(
             provider=self.name,

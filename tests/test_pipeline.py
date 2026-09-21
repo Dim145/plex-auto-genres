@@ -735,3 +735,63 @@ async def test_an_anime_library_can_take_tmdb_keywords_from_its_fallback(store: 
 
     assert report.written == 1
     assert handle.last_tags == ["space western", "bounty hunter"], "keywords, not genres"
+
+
+# -- merging several sources instead of falling back -----------------------
+
+
+@respx.mock
+async def test_merge_mode_pools_what_every_source_returned(store: Store):
+    """Fallback keeps the first answer; merge asks everyone and pools them."""
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d+").mock(
+        return_value=jikan_ok(1, genres=("Action",))
+    )
+    respx.post("https://graphql.anilist.co").mock(return_value=anilist_ok(("Drama",)))
+
+    handle = guid_item()
+    config = make_config(providers=["jikan", "anilist"], providerMode="merge", clearGenres=True)
+
+    report = await Pipeline(config, store, FakeServer([handle])).tag_library(config.libraries[0])
+
+    assert report.written == 1
+    assert handle.last_tags == ["Action", "Drama"]
+    assert store.get_state("Animes", "mal://1").provider == "jikan+anilist"
+
+
+@respx.mock
+async def test_merge_mode_still_answers_when_one_source_is_silent(store: Store):
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d+").mock(
+        return_value=httpx.Response(404)
+    )
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime\b").mock(
+        return_value=httpx.Response(200, json={"data": []})
+    )
+    respx.post("https://graphql.anilist.co").mock(return_value=anilist_ok(("Drama",)))
+
+    handle = guid_item()
+    config = make_config(providers=["jikan", "anilist"], providerMode="merge", clearGenres=True)
+
+    report = await Pipeline(config, store, FakeServer([handle])).tag_library(config.libraries[0])
+
+    assert (report.written, report.deferred, report.failed) == (1, 0, 0)
+    assert handle.last_tags == ["Drama"]
+
+
+@respx.mock
+async def test_merge_mode_leaves_a_pinned_title_to_the_source_that_was_pinned(store: Store):
+    """Otherwise the sources that cannot honour the pin search by title and
+    merge back the very match the binding was created to override."""
+    respx.get("https://api.jikan.moe/v4/anime/19").mock(
+        return_value=jikan_ok(19, genres=("Psychological",))
+    )
+    tmdb_search = respx.get("https://api.themoviedb.org/3/search/tv")
+
+    handle = guid_item()
+    store.set_binding("Animes", "mal://1", "mal", "19")
+    config = make_config(tmdb_key="k", providers=["jikan", "tmdb"],
+                         providerMode="merge", clearGenres=True)
+
+    report = await Pipeline(config, store, FakeServer([handle])).tag_library(config.libraries[0])
+
+    assert report.written == 1 and handle.last_tags == ["Psychological"]
+    assert not tmdb_search.called, "TMDB cannot read a MAL id, so it is not asked"

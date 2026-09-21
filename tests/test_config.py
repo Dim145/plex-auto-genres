@@ -122,22 +122,30 @@ def test_migration_drops_the_impossible_v1_combination():
     assert run.use_keywords is False   # a migrated anime library reads MAL alone
 
 
-def test_keywords_need_tmdb_in_the_chain_whatever_the_type():
-    """Keywords are TMDB's, so the rule follows the sources, not the type.
+def test_keywords_need_a_source_that_has_them():
+    """The rule follows the sources, not the library type.
 
-    An anime library that falls back to TMDB can ask for them; one that reads
-    MyAnimeList alone still cannot, and says which sources it does read.
+    TMDB has keywords and AniList has community tags; MyAnimeList has neither,
+    its themes and demographics being part of the genres it returns already.
     """
-    with pytest.raises(Exception, match="useKeywords needs tmdb"):
+    with pytest.raises(Exception, match="useKeywords needs a source with keywords"):
         AppConfig.model_validate({"version": 2, "libraries": [
             {"library": "X", "type": "anime", "useKeywords": True},
         ]})
 
-    config = AppConfig.model_validate({"version": 2, "libraries": [
-        {"library": "X", "type": "anime", "useKeywords": True,
-         "providers": ["jikan", "anilist", "tmdb"]},
-    ]})
-    assert config.find("X").use_keywords is True
+    for chain in (["jikan", "anilist"], ["jikan", "tmdb"]):
+        config = AppConfig.model_validate({"version": 2, "libraries": [
+            {"library": "X", "type": "anime", "useKeywords": True, "providers": chain},
+        ]})
+        assert config.find("X").use_keywords is True
+
+
+def test_the_keyword_sources_listed_in_config_are_the_ones_that_have_them():
+    """config.py cannot import the providers, so a test keeps the two in step."""
+    from plex_auto_genres.config import KEYWORD_PROVIDERS
+    from plex_auto_genres.providers import _CLASSES
+
+    assert set(KEYWORD_PROVIDERS) == {n for n, c in _CLASSES.items() if c.has_keywords}
 
 
 def test_default_providers_per_type():
@@ -248,3 +256,22 @@ def test_an_anime_library_may_end_its_chain_with_tmdb():
     })
     assert config.find("Animes").resolved_providers == ("jikan", "anilist", "tmdb")
     assert config.find("Plain").resolved_providers == ("jikan",), "still no TMDB by default"
+
+
+def test_spelling_variants_collapse_into_one_genre():
+    """Two sources spell one idea differently and Plex grows two collections.
+
+    Comparisons run on letters and digits alone, so punctuation, spacing, case
+    and accents stop splitting a genre in two.
+    """
+    rules = GenreRules(ignore=["ecchi"], replace={"comédie": "Comedy"})
+
+    assert rules.apply(["Boys Love", "Boys' Love", "boys-love"]) == ["Boys Love"]
+    assert rules.apply(["Comédie", "Comedy", "COMEDIE"]) == ["Comedy"]
+    assert rules.apply(["Sci-Fi", "Sci Fi"]) == ["Sci-Fi"], "first spelling seen wins"
+    assert rules.apply(["Ecchi", "ecchi!"]) == [], "an ignore rule matches variants too"
+
+
+def test_a_rename_reaches_a_genre_whatever_its_spelling():
+    rules = GenreRules(replace={"sci fi": "Science Fiction"})
+    assert rules.apply(["Sci-Fi"]) == ["Science Fiction"]

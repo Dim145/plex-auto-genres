@@ -22,8 +22,10 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
+import unicodedata
 from pathlib import Path
 from typing import Any, Literal
 
@@ -45,6 +47,24 @@ DEFAULT_PROVIDERS: dict[MediaType, tuple[str, ...]] = {
 
 ProviderName = Literal["jikan", "anilist", "tmdb"]
 
+#: Sources with a finer vocabulary than their genres, which ``useKeywords``
+#: asks for. Mirrors ``Provider.has_keywords``; a test keeps the two in step,
+#: since importing the providers here would be circular.
+KEYWORD_PROVIDERS = ("anilist", "tmdb")
+
+
+def fold(name: str) -> str:
+    """A comparison key for a genre or tag: what two spellings share.
+
+    Case, accents, punctuation and spacing all go, so "Boys Love" and
+    "Boys' Love" stop becoming two collections in Plex, and a rename rule
+    written as "sci-fi" matches "Sci Fi" as well. Two words that genuinely
+    differ -- "Comedy" and "Comedie" -- still need a rename rule to meet.
+    """
+    decomposed = unicodedata.normalize("NFKD", name)
+    bare = "".join(c for c in decomposed if not unicodedata.combining(c))
+    return re.sub(r"[^0-9a-z]+", "", bare.casefold())
+
 
 class GenreRules(BaseModel):
     """Post-processing applied to the raw genre list a provider returned."""
@@ -53,13 +73,18 @@ class GenreRules(BaseModel):
 
     ignore: list[str] = Field(
         default_factory=list,
-        description="Genres to drop entirely. Case-insensitive.",
+        description=(
+            "Genres to drop entirely. Matched on letters and digits alone, so "
+            "case, accents and punctuation do not have to line up."
+        ),
     )
     replace: dict[str, str] = Field(
         default_factory=dict,
         description=(
-            "Rename map applied after 'ignore'. Keys are matched "
-            "case-insensitively; the value is written verbatim."
+            "Rename map applied after 'ignore', and the way to make two "
+            "sources agree: map 'comedie' to 'Comedy' and both spellings "
+            "become one collection. Keys match on letters and digits alone; "
+            "the value is written verbatim."
         ),
     )
     sorted_prefix: str = Field(
@@ -122,20 +147,26 @@ class GenreRules(BaseModel):
         )
 
     def apply(self, genres: list[str]) -> list[str]:
-        """Run ignore -> replace -> dedupe -> cap over a raw provider list."""
-        ignore = {g.lower() for g in self.ignore}
+        """Run ignore -> replace -> dedupe -> cap over a raw provider list.
+
+        Every comparison goes through :func:`fold`, so spelling variants of one
+        name collapse instead of becoming two collections -- which is what
+        merging several sources produces on its own.
+        """
+        ignore = {fold(g) for g in self.ignore}
+        renames = {fold(k): v for k, v in self.replace.items()}
         out: list[str] = []
         seen: set[str] = set()
         for genre in genres:
-            key = genre.strip().lower()
+            key = fold(genre)
             if not key or key in ignore:
                 continue
-            resolved = self.replace.get(key, genre.strip())
+            resolved = renames.get(key, genre.strip())
             # Re-check ignore against the replacement so a rename cannot
             # resurrect a genre the user asked to drop.
-            if resolved.lower() in ignore:
+            if fold(resolved) in ignore:
                 continue
-            dedupe_key = resolved.lower()
+            dedupe_key = fold(resolved)
             if dedupe_key in seen:
                 continue
             seen.add(dedupe_key)
@@ -157,10 +188,20 @@ class LibraryRun(BaseModel):
     providers: list[ProviderName] | None = Field(
         default=None,
         description=(
-            "Metadata sources, tried in order until one returns genres. "
-            "Defaults to ['jikan'] for anime and ['tmdb'] otherwise. An anime "
-            "library may end its list with 'tmdb' as a last resort, which "
-            "needs TMDB_API_KEY and returns TMDB's taxonomy, not MAL's."
+            "Metadata sources, in preference order. Defaults to ['jikan'] for "
+            "anime and ['tmdb'] otherwise. An anime library may end its list "
+            "with 'tmdb', which needs TMDB_API_KEY and returns TMDB's "
+            "taxonomy, not MAL's."
+        ),
+    )
+    provider_mode: Literal["fallback", "merge"] = Field(
+        default="fallback",
+        alias="providerMode",
+        description=(
+            "How several sources are combined. 'fallback' asks them in order "
+            "and keeps the first answer. 'merge' asks all of them and pools "
+            "what they return, which costs a request per source per title and "
+            "needs a maxGenres cap to stay readable."
         ),
     )
 
@@ -209,13 +250,13 @@ class LibraryRun(BaseModel):
 
     @model_validator(mode="after")
     def _check_coherent(self) -> "LibraryRun":
-        if self.use_keywords and "tmdb" not in self.resolved_providers:
-            # Keywords are a TMDB concept. An anime library may still ask for
-            # them once TMDB is in its chain as the last fallback.
+        if self.use_keywords and not any(
+            p in KEYWORD_PROVIDERS for p in self.resolved_providers
+        ):
             raise ValueError(
-                "useKeywords needs tmdb among this library's providers: "
-                f"it reads {' -> '.join(self.resolved_providers)}, and no other "
-                "source has keywords."
+                "useKeywords needs a source with keywords "
+                f"({', '.join(KEYWORD_PROVIDERS)}): this library reads "
+                f"{' -> '.join(self.resolved_providers)}."
             )
         if self.clear_genres and not self.use_genres:
             # v1 silently ignored this combination. Say so instead.
@@ -353,6 +394,7 @@ class AppConfig(BaseModel):
             "library": run.library,
             "type": run.type.value,
             "providers": list(run.resolved_providers),
+            "provider_mode": run.provider_mode,
             "use_genres": run.use_genres,
             "use_keywords": run.use_keywords,
             "clear_genres": run.clear_genres,

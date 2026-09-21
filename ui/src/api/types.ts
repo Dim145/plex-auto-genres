@@ -59,6 +59,8 @@ export interface LibraryRun {
   type: MediaType;
   enabled: boolean;
   providers: string[] | null;
+  /** How several sources combine: keep the first answer, or pool them all. */
+  providerMode: "fallback" | "merge";
   useGenres: boolean;
   useKeywords: boolean;
   clearGenres: boolean;

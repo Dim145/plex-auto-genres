@@ -253,6 +253,44 @@ progress file.
 
 `plex-auto-genres schema` prints the JSON Schema, so editors can autocomplete it.
 
+### Several sources at once
+
+`providers` is a preference order, and `providerMode` says what "several" means:
+
+| Mode | What a title costs | What it returns |
+|---|---|---|
+| `fallback` (default) | one request, until a source answers | the first answer |
+| `merge` | one request per source | every source's genres, pooled |
+
+```jsonc
+{ "library": "Animes", "type": "anime",
+  "providers": ["jikan", "anilist", "tmdb"], "providerMode": "merge",
+  "overrides": { "maxGenres": 10 } }
+```
+
+Merging is worth a cap: three sources can hand back thirty names for one title. A
+manually bound title is only asked of the sources that can read the id you pinned,
+so a merge cannot quietly bring back the match the binding was overriding.
+
+`useKeywords` swaps genres for the finer vocabulary of whichever sources have one:
+TMDB's keywords, AniList's community tags. MyAnimeList has none, since its themes and
+demographics are already part of the genres it returns.
+
+### When two sources spell one genre differently
+
+Genres are compared on letters and digits alone, so `Boys Love`, `Boys' Love` and
+`boys-love` are one collection, not three, and the first spelling a source returned is
+the one written. Different *words* still need a rule — which is what `replace` is for,
+and it is the answer to mixing a localized source with English-only ones:
+
+```jsonc
+"defaults": { "anime": { "replace": { "comedie": "Comedy", "science-fiction": "Sci-Fi" } } }
+```
+
+Keys match the same way, so one line covers `Comédie`, `comedie` and `COMÉDIE`. The
+other way out is to stop the mismatch at the source: `TMDB_LANGUAGE=en-US` makes TMDB
+agree with MyAnimeList and AniList, which are English-only.
+
 ### Environment
 
 | Variable | Purpose |

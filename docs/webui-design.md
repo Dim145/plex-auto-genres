@@ -588,6 +588,31 @@ Both halves are now closed:
   the library's sources can read instead of a hard-coded table that could drift. The
   same function now answers "would this item match by GUID?" in the item browser.
 
+### Several sources, and names that agree — done
+
+Three requests from a library in use, all of them about what ends up written:
+
+- **Keywords are a source capability, not a library type.** `useKeywords` meant TMDB's
+  keywords; AniList's community tags are the same idea, and its genre list is a dozen
+  buckets that say little across a whole library. `Provider.has_keywords` now carries
+  that, AniList returns its tags *instead of* its genres when keywords are asked for,
+  and the config rule asks whether any configured source has them rather than looking
+  at the type. `config.py` cannot import the providers, so the list is mirrored there
+  and a test keeps the two in step.
+- **`providerMode`: fallback or merge.** Falling back keeps the first answer and costs
+  one request; merging asks every source and pools what comes back, at one request per
+  source per title. `_resolve` split into an `_ask` that puts one question to one source
+  and records what that says about its health, and two ways of using it. One rule is
+  worth stating: in merge mode a *bound* title is only asked of the sources that can
+  read the pinned id, because the others would search by title and merge back the very
+  match the binding exists to override.
+- **Names are compared folded.** Two sources spell one idea differently and Plex grows
+  two collections: "Boys Love" beside "Boys' Love". Every comparison in `GenreRules`
+  now runs through `fold()` — case, accents, punctuation and spacing removed — so
+  variants collapse and a rename rule reaches every spelling of its key. Genuinely
+  different words across languages still need a `replace` line, which is now the one
+  documented way to make a localized TMDB agree with the English-only anime sources.
+
 ### Next
 
 Decide where secrets should live if they are ever to be edited from the UI — the

@@ -15,6 +15,7 @@ export const newLibrary = (library = ""): LibraryRun => ({
   type: "anime",
   enabled: true,
   providers: null,
+  providerMode: "fallback",
   useGenres: false,
   useKeywords: false,
   clearGenres: false,
@@ -87,6 +88,17 @@ export const ANIME_PROVIDER_PRESETS: { key: string; label: string; value: string
 
 /** An anime library may end its chain with TMDB; it is never one of the presets. */
 export const ANIME_FALLBACK = "tmdb";
+
+/**
+ * Sources with something finer than genres, which `useKeywords` asks for.
+ * Mirrors `Provider.has_keywords`; the server refuses the combination anyway,
+ * so the worst a drift here can do is show or hide one toggle.
+ */
+export const KEYWORD_SOURCES = ["anilist", "tmdb"];
+
+/** What a library actually reads, the way the server resolves it. */
+export const sourceChain = (providers: string[] | null, type: MediaType): string[] =>
+  providers ?? (type === "anime" ? ["jikan"] : ["tmdb"]);
 
 /** The anime sources of a chain, without the optional TMDB tail. */
 const animeSources = (providers: string[] | null) =>

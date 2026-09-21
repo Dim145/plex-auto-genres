@@ -26,7 +26,7 @@ def test_validate_reports_field_locations_in_file_key_names():
     })
     assert config is None
     assert errors and errors[0]["loc"] == ["libraries", 0]
-    assert errors[0]["msg"].startswith("useKeywords needs tmdb")   # no "Value error, " prefix
+    assert errors[0]["msg"].startswith("useKeywords needs a source")   # no "Value error, " prefix
 
 
 def test_validate_accepts_a_good_document_and_ignores_env_only_keys():

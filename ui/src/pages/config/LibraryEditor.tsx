@@ -4,7 +4,7 @@ import type { LibraryRun, MediaType, ValidationIssue } from "../../api/types";
 import { Field } from "../../components/form/Field";
 import { Segmented } from "../../components/form/Segmented";
 import { Toggle } from "../../components/form/Toggle";
-import { ANIME_FALLBACK, ANIME_PROVIDER_PRESETS, TYPES, animeProviders, emptyRules, hasTmdbFallback, issueAt, issuesOwn, providerPresetKey, rulesEmpty, type Help } from "./editor";
+import { ANIME_PROVIDER_PRESETS, KEYWORD_SOURCES, TYPES, animeProviders, emptyRules, hasTmdbFallback, issueAt, issuesOwn, providerPresetKey, rulesEmpty, sourceChain, type Help } from "./editor";
 import { RulesEditor } from "./RulesEditor";
 
 export function LibraryEditor({
@@ -39,17 +39,19 @@ export function LibraryEditor({
   const set = <K extends keyof LibraryRun>(key: K, value: LibraryRun[K]) => onChange({ ...lib, [key]: value });
   const isAnime = lib.type === "anime";
   const listId = `${id}-sections`;
-  // Mirrors the server's resolved_providers: keywords are a TMDB concept, so
-  // the toggle only exists where TMDB is actually in the chain -- including an
-  // anime library that falls back to it.
-  const readsTmdb = (lib.providers ?? (isAnime ? ["jikan"] : ["tmdb"])).includes(ANIME_FALLBACK);
+  const chain = sourceChain(lib.providers, lib.type);
+  // Keywords exist only where a source has them, so the toggle follows the
+  // chain rather than the library type.
+  const hasKeywords = chain.some((p) => KEYWORD_SOURCES.includes(p));
+  const merging = lib.providerMode === "merge";
 
-  /** Set the source chain, dropping keywords with TMDB if it leaves. */
+  /** Set the source chain, dropping keywords with the source that had them. */
   const setProviders = (next: string[] | null) =>
     onChange({
       ...lib,
       providers: next,
-      useKeywords: (next ?? []).includes(ANIME_FALLBACK) && lib.useKeywords,
+      useKeywords:
+        sourceChain(next, lib.type).some((p) => KEYWORD_SOURCES.includes(p)) && lib.useKeywords,
     });
 
   const changeType = (type: MediaType) => {
@@ -135,9 +137,23 @@ export function LibraryEditor({
                     ),
                   )
                 }
-                label="…then TMDB"
-                help="A last resort when no anime source answers. Returns TMDB's own genres, and needs TMDB_API_KEY."
+                label={merging ? "…and TMDB" : "…then TMDB"}
+                help={merging
+                  ? "TMDB is asked for every title too, and its genres join the anime ones. Needs TMDB_API_KEY."
+                  : "A last resort when no anime source answers. Returns TMDB's own genres, and needs TMDB_API_KEY."}
               />
+              {chain.length > 1 && (
+                <Segmented
+                  name={`${id}-mode`}
+                  ariaLabel="How the sources combine"
+                  value={lib.providerMode}
+                  onChange={(v) => set("providerMode", v)}
+                  options={[
+                    { value: "fallback", label: "first answer", hint: "Ask in order, keep the first source that answers" },
+                    { value: "merge", label: "merge all", hint: "Ask every source and pool what they return" },
+                  ]}
+                />
+              )}
             </div>
           ) : (
             <div className="mono tone-teal" style={{ minHeight: 38, display: "flex", alignItems: "center" }}>tmdb</div>
@@ -160,8 +176,16 @@ export function LibraryEditor({
         <div className="toggle-grid">
           <Toggle id={`${id}-enabled`} checked={lib.enabled} onChange={(v) => set("enabled", v)} label="Enabled" help={help("LibraryRun", "enabled")} />
           <Toggle id={`${id}-clear`} checked={lib.clearGenres} disabled={!lib.useGenres} onChange={(v) => set("clearGenres", v)} label="Replace existing genres" help={lib.useGenres ? help("LibraryRun", "clearGenres") : "Only when writing the genre field"} />
-          {readsTmdb && (
-            <Toggle id={`${id}-keywords`} checked={lib.useKeywords} onChange={(v) => set("useKeywords", v)} label="Use TMDB keywords" help={isAnime ? "Only for the titles TMDB itself answers for. Much noisier than its genres." : help("LibraryRun", "useKeywords")} />
+          {hasKeywords && (
+            <Toggle
+              id={`${id}-keywords`}
+              checked={lib.useKeywords}
+              onChange={(v) => set("useKeywords", v)}
+              label="Use keywords, not genres"
+              help={isAnime
+                ? "TMDB's keywords and AniList's community tags, from whichever of them this library reads. Much finer, and much noisier."
+                : help("LibraryRun", "useKeywords")}
+            />
           )}
         </div>
 

@@ -517,3 +517,30 @@ def test_bindable_schemes_follow_what_the_sources_read():
     assert bindable_schemes(MediaType.STANDARD_TV, ["tmdb"]) == ["tmdb", "imdb", "tvdb"]
     assert bindable_schemes(MediaType.STANDARD_MOVIE, ["tmdb"]) == ["tmdb", "imdb"]
     assert bindable_schemes(MediaType.ANIME, []) == ["anidb"]
+
+
+@respx.mock
+async def test_anilist_returns_its_tags_instead_of_its_genres_for_keywords():
+    """Its genre list is a dozen broad buckets; the tags are the fine detail."""
+    respx.post("https://graphql.anilist.co").mock(
+        return_value=httpx.Response(200, json={"data": {"Media": {
+            "id": 1, "idMal": 1, "title": {"romaji": "Show"},
+            "genres": ["Action", "Drama"],
+            "tags": [{"name": "Space", "rank": 90, "isGeneralSpoiler": False},
+                     {"name": "Time Loop", "rank": 80, "isGeneralSpoiler": False},
+                     {"name": "Faint", "rank": 20, "isGeneralSpoiler": False},
+                     {"name": "Ending", "rank": 99, "isGeneralSpoiler": True}],
+            "averageScore": 80, "startDate": {"year": 1998},
+            "siteUrl": "https://anilist.co/anime/1",
+        }}})
+    )
+    provider = AniListProvider(transport("anilist"))
+    pinned = ExternalId("anilist", "1")
+
+    plain = await provider.fetch_by_id(pinned, LookupRequest("x", None, MediaType.ANIME))
+    keywords = await provider.fetch_by_id(
+        pinned, LookupRequest("x", None, MediaType.ANIME, use_keywords=True)
+    )
+
+    assert plain.genres == ["Action", "Drama", "Space", "Time Loop"]
+    assert keywords.genres == ["Space", "Time Loop"], "tags only, still without the noise"

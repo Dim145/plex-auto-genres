@@ -178,6 +178,11 @@ class Provider(abc.ABC):
     name: str = "provider"
     #: Plex GUID schemes this provider can consume without a search.
     guid_schemes: tuple[str, ...] = ()
+    #: Whether this source has a finer vocabulary than its genres, which
+    #: ``useKeywords`` asks for: TMDB's keywords, AniList's community tags.
+    #: MyAnimeList has none -- its themes and demographics are already folded
+    #: into the genres it returns.
+    has_keywords: bool = False
     #: Library types this provider can serve.
     supports: tuple[MediaType, ...] = ()
 

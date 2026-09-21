@@ -46,6 +46,7 @@ class TmdbProvider(Provider):
     name = "tmdb"
     #: TMDB's own id first: it is the only one that needs no cross-reference.
     guid_schemes = ("tmdb", "imdb", "tvdb")
+    has_keywords = True
     #: Anime is here as a *last* fallback: TMDB carries most anime as ordinary
     #: TV or film entries, so it answers when MyAnimeList and AniList do not --
     #: with TMDB's own taxonomy ("Animation", "Action & Adventure") rather than

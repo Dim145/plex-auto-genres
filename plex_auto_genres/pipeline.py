@@ -18,6 +18,7 @@ import contextlib
 import logging
 import time
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 from .config import AppConfig, LibraryRun
@@ -40,6 +41,41 @@ log = logging.getLogger(__name__)
 #: enough to ride out a bad minute, short enough that a library of thousands
 #: does not grind through the whole list against an API that is down.
 GIVE_UP_AFTER = 25
+
+
+@dataclass(frozen=True, slots=True)
+class Reply:
+    """What one source said: a record, a verdict, or nothing at all."""
+
+    result: ProviderResult | None = None
+    error: str = ""
+    #: It answered about the title, even if the answer was "no such thing".
+    answered: bool = False
+    #: It did not answer at all, so nothing is known from it.
+    silent: bool = False
+
+
+def merge_results(results: list[ProviderResult]) -> ProviderResult:
+    """Pool what several sources returned for one title.
+
+    Their genres are concatenated in source order and left for the rules to
+    fold and cap; the first source that answered supplies the identity, since
+    that is the one the library prefers.
+    """
+    first = results[0]
+    genres: list[str] = []
+    for result in results:
+        genres.extend(result.genres)
+    merged = ProviderResult(
+        provider="+".join(r.provider for r in results),
+        provider_id=first.provider_id,
+        title=first.title,
+        genres=genres,
+        score=next((r.score for r in results if r.score is not None), None),
+        url=first.url,
+    )
+    merged.matched_by = first.matched_by
+    return merged
 
 
 def media_key(item: MediaItem) -> str:
@@ -416,26 +452,29 @@ class Pipeline:
         #: A source that is standing down counts as silent without being asked.
         silent = len(live) < len(providers)
         answered = False
-        for provider in live:
-            try:
-                result = await provider.resolve(request)
-            except ProviderNotFound as exc:
-                # A verdict: this source has no such title. Move on.
-                answered = True
-                pool.note_reachable(provider)
-                errors.append(str(exc))
-            except ProviderAuthError as exc:
-                # Reachable, just refusing our key. No verdict, but retrying
-                # will not produce one either.
-                pool.note_reachable(provider)
-                errors.append(str(exc))
-            except ProviderError as exc:
-                silent = True
-                errors.append(str(exc))
-                pool.note_unreachable(provider, str(exc))
-            else:
-                pool.note_reachable(provider)
-                return result
+
+        if run.provider_mode == "merge":
+            if pinned:
+                # The pin says which record this is. Letting the other sources
+                # search by title would merge in the very match it overrode.
+                live = [p for p in live if honours_pin(p)]
+            replies = await asyncio.gather(*(self._ask(p, request, pool) for p in live))
+        else:
+            replies = []
+            for provider in live:
+                reply = await self._ask(provider, request, pool)
+                replies.append(reply)
+                if reply.result is not None:
+                    break
+
+        found = [r.result for r in replies if r.result is not None]
+        for reply in replies:
+            if reply.result is None:
+                errors.append(reply.error)
+                answered = answered or reply.answered
+                silent = silent or reply.silent
+        if found:
+            return found[0] if len(found) == 1 else merge_results(found)
 
         detail = "; ".join(errors)
         if silent and not answered:
@@ -446,6 +485,26 @@ class Pipeline:
             # miss into a deferral for as long as any source stood down.
             raise ProviderUnavailable(detail or "no source was reachable")
         raise ProviderNotFound(detail or "no provider could resolve this title")
+
+    @staticmethod
+    async def _ask(provider: Provider, request: LookupRequest, pool: ProviderPool) -> "Reply":
+        """Put one question to one source, and record what that says about it."""
+        try:
+            result = await provider.resolve(request)
+        except ProviderNotFound as exc:
+            # A verdict: this source has no such title.
+            pool.note_reachable(provider)
+            return Reply(error=str(exc), answered=True)
+        except ProviderAuthError as exc:
+            # Reachable, just refusing our key. No verdict, but retrying will
+            # not produce one either.
+            pool.note_reachable(provider)
+            return Reply(error=str(exc))
+        except ProviderError as exc:
+            pool.note_unreachable(provider, str(exc))
+            return Reply(error=str(exc), silent=True)
+        pool.note_reachable(provider)
+        return Reply(result=result)
 
     @staticmethod
     def _tally(report: RunReport, outcome: ItemOutcome) -> None:
