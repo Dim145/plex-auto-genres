@@ -172,7 +172,12 @@ class LibraryRun(BaseModel):
     use_keywords: bool = Field(
         default=False,
         alias="useKeywords",
-        description="TMDB only: use keywords instead of genres. Much noisier.",
+        description=(
+            "Take TMDB's keywords instead of its genres. Much noisier, and it "
+            "needs TMDB among this library's providers -- including an anime "
+            "library that falls back to it, where only the titles TMDB itself "
+            "answers are affected."
+        ),
     )
     clear_genres: bool = Field(
         default=False,
@@ -204,10 +209,13 @@ class LibraryRun(BaseModel):
 
     @model_validator(mode="after")
     def _check_coherent(self) -> "LibraryRun":
-        if self.use_keywords and self.type is MediaType.ANIME:
+        if self.use_keywords and "tmdb" not in self.resolved_providers:
+            # Keywords are a TMDB concept. An anime library may still ask for
+            # them once TMDB is in its chain as the last fallback.
             raise ValueError(
-                "useKeywords only applies to TMDB-backed libraries; "
-                "anime libraries have no keyword concept."
+                "useKeywords needs tmdb among this library's providers: "
+                f"it reads {' -> '.join(self.resolved_providers)}, and no other "
+                "source has keywords."
             )
         if self.clear_genres and not self.use_genres:
             # v1 silently ignored this combination. Say so instead.
@@ -448,6 +456,8 @@ def migrate_v1(raw: dict[str, Any]) -> dict[str, Any]:
         if migrated["clearGenres"] and not migrated["useGenres"]:
             migrated["clearGenres"] = False
         # v1 ran keyword lookups against anime libraries too; they were ignored.
+        # A migrated library names no providers, so an anime one reads MAL
+        # alone and could not use keywords even now.
         if migrated["useKeywords"] and migrated["type"] == MediaType.ANIME.value:
             migrated["useKeywords"] = False
         libraries.append(migrated)

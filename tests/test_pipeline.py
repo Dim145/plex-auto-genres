@@ -696,3 +696,42 @@ async def test_an_imdb_binding_is_honoured_through_tmdb(store: Store):
     assert report.written == 1 and handle.last_tags == ["Action"]
     assert not search.called, "the pinned id settled it, no title search"
     assert store.get_state("Films", "Film (1999)").source == "binding"
+
+
+@respx.mock
+async def test_an_anime_library_can_take_tmdb_keywords_from_its_fallback(store: Store):
+    """Keywords became reachable for anime the moment TMDB joined the chain.
+
+    They are TMDB's own concept, so they apply to exactly the titles TMDB
+    answered for; the anime sources above it are untouched.
+    """
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d+").mock(
+        return_value=httpx.Response(404)
+    )
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime\b").mock(
+        return_value=httpx.Response(200, json={"data": []})
+    )
+    respx.get("https://api.themoviedb.org/3/search/tv").mock(
+        return_value=httpx.Response(200, json={
+            "results": [{"id": 7, "name": "Anime", "first_air_date": "1998-04-03"}]})
+    )
+    respx.get("https://api.themoviedb.org/3/tv/7").mock(
+        return_value=httpx.Response(200, json={
+            "id": 7, "name": "Anime",
+            "genres": [{"name": "Animation"}],
+            "keywords": {"results": [{"name": "space western"}, {"name": "bounty hunter"}]},
+        })
+    )
+    handle = guid_item(title="Anime", year=1998)
+    config = AppConfig.model_validate({
+        "version": 2,
+        "libraries": [{"library": "Animes", "type": "anime", "useGenres": True,
+                       "clearGenres": True, "useKeywords": True,
+                       "providers": ["jikan", "tmdb"]}],
+        "providers": {"tmdb_api_key": "k"},
+    })
+
+    report = await Pipeline(config, store, FakeServer([handle])).tag_library(config.libraries[0])
+
+    assert report.written == 1
+    assert handle.last_tags == ["space western", "bounty hunter"], "keywords, not genres"

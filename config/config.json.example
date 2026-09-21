@@ -85,7 +85,7 @@
             "useGenres": false,
             "setPosters": true,
 
-            "//useKeywords": "TMDB keywords instead of genres: far more specific, far noisier. Pair it with maxGenres.",
+            "//useKeywords": "TMDB keywords instead of genres: far more specific, far noisier. Needs tmdb among this library's providers, an anime library included once it falls back to TMDB. Pair it with maxGenres.",
             "useKeywords": true,
             "overrides": {
                 "maxGenres": 8

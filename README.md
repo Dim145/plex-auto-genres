@@ -210,6 +210,10 @@ be added as a last resort:
 { "library": "Animes", "type": "anime", "providers": ["jikan", "anilist", "tmdb"] }
 ```
 
+With TMDB in the chain, `useKeywords` becomes available to an anime library
+too. It applies to exactly the titles TMDB answered for, and it is refused on a
+library whose sources cannot produce keywords at all.
+
 Titles an earlier version already wrote off as failures are still sitting
 behind their retry backoff. Clear those entries — and only those — then run
 again:

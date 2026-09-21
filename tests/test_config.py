@@ -119,14 +119,25 @@ def test_migration_drops_the_impossible_v1_combination():
     config = build(raw)
     run = config.find("X")
     assert run.clear_genres is False   # was a no-op in v1
-    assert run.use_keywords is False   # anime has no TMDB keywords
+    assert run.use_keywords is False   # a migrated anime library reads MAL alone
 
 
-def test_keywords_on_an_anime_library_is_rejected_in_v2():
-    with pytest.raises(Exception, match="useKeywords only applies"):
+def test_keywords_need_tmdb_in_the_chain_whatever_the_type():
+    """Keywords are TMDB's, so the rule follows the sources, not the type.
+
+    An anime library that falls back to TMDB can ask for them; one that reads
+    MyAnimeList alone still cannot, and says which sources it does read.
+    """
+    with pytest.raises(Exception, match="useKeywords needs tmdb"):
         AppConfig.model_validate({"version": 2, "libraries": [
             {"library": "X", "type": "anime", "useKeywords": True},
         ]})
+
+    config = AppConfig.model_validate({"version": 2, "libraries": [
+        {"library": "X", "type": "anime", "useKeywords": True,
+         "providers": ["jikan", "anilist", "tmdb"]},
+    ]})
+    assert config.find("X").use_keywords is True
 
 
 def test_default_providers_per_type():
