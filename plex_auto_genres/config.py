@@ -22,17 +22,16 @@ import hashlib
 import json
 import logging
 import os
-import re
 import shutil
 import tempfile
-import unicodedata
+from functools import cached_property
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from .errors import ConfigError
-from .models import MediaType
+from .models import MediaType, fold
 
 log = logging.getLogger(__name__)
 
@@ -51,19 +50,6 @@ ProviderName = Literal["jikan", "anilist", "tmdb"]
 #: asks for. Mirrors ``Provider.has_keywords``; a test keeps the two in step,
 #: since importing the providers here would be circular.
 KEYWORD_PROVIDERS = ("anilist", "tmdb")
-
-
-def fold(name: str) -> str:
-    """A comparison key for a genre or tag: what two spellings share.
-
-    Case, accents, punctuation and spacing all go, so "Boys Love" and
-    "Boys' Love" stop becoming two collections in Plex, and a rename rule
-    written as "sci-fi" matches "Sci Fi" as well. Two words that genuinely
-    differ -- "Comedy" and "Comedie" -- still need a rename rule to meet.
-    """
-    decomposed = unicodedata.normalize("NFKD", name)
-    bare = "".join(c for c in decomposed if not unicodedata.combining(c))
-    return re.sub(r"[^0-9a-z]+", "", bare.casefold())
 
 
 class GenreRules(BaseModel):
@@ -120,7 +106,18 @@ class GenreRules(BaseModel):
         """Lower-case the lookup keys so config casing stops mattering.
 
         v1 raised a bare ``KeyError`` when a key was not already lower-case.
+        Keys are matched folded, so two that fold alike would quietly cancel
+        each other: say so instead of dropping one.
         """
+        seen: dict[str, str] = {}
+        for key in value:
+            folded = fold(key)
+            if folded and folded in seen:
+                raise ValueError(
+                    f"replace keys {seen[folded]!r} and {key!r} are the same rule: "
+                    "they match on letters and digits alone. Keep one."
+                )
+            seen[folded] = key
         return {k.strip().lower(): v for k, v in value.items()}
 
     @field_validator("ignore")
@@ -146,6 +143,17 @@ class GenreRules(BaseModel):
             maxGenres=override.max_genres if override.max_genres is not None else self.max_genres,
         )
 
+    @cached_property
+    def _folded(self) -> tuple[frozenset[str], dict[str, str]]:
+        """The ignore set and rename map under :func:`fold`, built once.
+
+        ``apply`` runs per title over a whole library, and these tables never
+        change after validation.
+        """
+        return frozenset(fold(g) for g in self.ignore), {
+            fold(k): v for k, v in self.replace.items()
+        }
+
     def apply(self, genres: list[str]) -> list[str]:
         """Run ignore -> replace -> dedupe -> cap over a raw provider list.
 
@@ -153,8 +161,7 @@ class GenreRules(BaseModel):
         name collapse instead of becoming two collections -- which is what
         merging several sources produces on its own.
         """
-        ignore = {fold(g) for g in self.ignore}
-        renames = {fold(k): v for k, v in self.replace.items()}
+        ignore, renames = self._folded
         out: list[str] = []
         seen: set[str] = set()
         for genre in genres:
@@ -162,11 +169,11 @@ class GenreRules(BaseModel):
             if not key or key in ignore:
                 continue
             resolved = renames.get(key, genre.strip())
+            dedupe_key = fold(resolved)
             # Re-check ignore against the replacement so a rename cannot
             # resurrect a genre the user asked to drop.
-            if fold(resolved) in ignore:
+            if dedupe_key in ignore:
                 continue
-            dedupe_key = fold(resolved)
             if dedupe_key in seen:
                 continue
             seen.add(dedupe_key)
@@ -382,12 +389,18 @@ class AppConfig(BaseModel):
         return next((r for r in self.libraries if r.library.casefold() == target), None)
 
     def fingerprint(self, run: LibraryRun) -> str:
-        """Hash of everything that affects the genre list written for a library.
+        """Hash of the *settings* that decide the genre list for a library.
 
-        When any of it changes, cached entries for that library become stale and
-        the pipeline reprocesses them. This is what v1 got wrong by keying the
-        progress files on media *type* alone, so two libraries sharing a type
-        also shared -- and poisoned -- one cache.
+        When any of them changes, cached entries for that library become stale
+        and the pipeline reprocesses them. This is what v1 got wrong by keying
+        the progress files on media *type* alone, so two libraries sharing a
+        type also shared -- and poisoned -- one cache.
+
+        It covers what the user configured, not how this version interprets it:
+        a release that changes the interpretation -- names compared folded,
+        AniList answering with tags -- deliberately leaves existing entries
+        alone rather than re-tagging every library on upgrade. ``--force`` is
+        how you ask for that.
         """
         rules = self.rules_for(run)
         payload = {
@@ -402,11 +415,15 @@ class AppConfig(BaseModel):
             "replace": dict(sorted(rules.replace.items())),
             "max_genres": rules.max_genres,
         }
+        # Only non-default values join the hash: a key every library carries
+        # would change every fingerprint ever computed and send a whole
+        # install back through its libraries for nothing.
         if run.provider_mode != "fallback":
-            # Only a non-default mode joins the hash. Adding a key that every
-            # library carries would change every fingerprint ever computed and
-            # send a whole install back through its libraries for nothing.
             payload["provider_mode"] = run.provider_mode
+        if self.providers.tmdb_language != "en-US":
+            # TMDB answers in this language, so it decides the very strings
+            # written to Plex; changing it has to re-tag the library.
+            payload["tmdb_language"] = self.providers.tmdb_language
         blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(blob.encode()).hexdigest()[:16]
 

@@ -138,6 +138,32 @@ def test_an_older_database_keeps_its_bindings_when_the_table_is_widened(tmp_path
     store.close()
 
 
+def test_a_half_finished_widening_does_not_wedge_the_database(tmp_path):
+    """The rebuild once ran statement by statement, each committing on its
+    own: an interruption either lost every binding or left a table behind
+    that made the next open raise, which is the whole database gone."""
+    import sqlite3
+
+    path = tmp_path / "interrupted.db"
+    legacy = sqlite3.connect(path)
+    legacy.executescript(
+        "CREATE TABLE bindings (library TEXT NOT NULL, media_key TEXT NOT NULL, "
+        "provider TEXT NOT NULL, provider_id TEXT NOT NULL, note TEXT, "
+        "created_at REAL NOT NULL, PRIMARY KEY (library, media_key));"
+        "INSERT INTO bindings VALUES ('Animes','mal://1','mal','19',NULL,1.0);"
+        # What a killed attempt leaves on disk.
+        "CREATE TABLE bindings_widened (library TEXT, media_key TEXT, provider TEXT, "
+        "provider_id TEXT, note TEXT, created_at REAL);"
+    )
+    legacy.commit()
+    legacy.close()
+
+    for _ in range(2):
+        store = Store(path)
+        assert store.get_bindings("Animes", "mal://1") == [ExternalId("mal", "19")]
+        store.close()
+
+
 # -- runs and snapshots ----------------------------------------------------
 
 def test_run_lifecycle_and_report_persistence(store: Store):

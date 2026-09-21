@@ -186,7 +186,11 @@ def build_providers(
         timeout=httpx.Timeout(20.0, connect=10.0),
         headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
         follow_redirects=True,
-        limits=httpx.Limits(max_connections=settings.concurrency * 2),
+        # A merging library asks every source about the same title at once,
+        # so the ceiling is titles in flight times sources, not titles alone.
+        # Sized for one title's worth of slack, a merge would otherwise queue
+        # on the pool, time out, and have healthy sources stood down for it.
+        limits=httpx.Limits(max_connections=settings.concurrency * (len(names) + 1)),
     )
     built: list[Provider] = []
     for name in names:

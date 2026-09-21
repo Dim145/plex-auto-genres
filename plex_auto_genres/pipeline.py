@@ -71,7 +71,10 @@ def merge_results(results: list[ProviderResult]) -> ProviderResult:
         provider_id=first.provider_id,
         title=first.title,
         genres=genres,
-        score=next((r.score for r in results if r.score is not None), None),
+        # Identity and rating come from the same source. Taking the first
+        # score *available* could write one record's rating beside another
+        # record's id, which is what an audit of a wrong rating would follow.
+        score=first.score,
         url=first.url,
     )
     merged.matched_by = first.matched_by
@@ -412,15 +415,22 @@ class Pipeline:
         mapper: AniDbMapper,
         bindings: Bindings,
     ) -> ProviderResult:
-        """Try each configured provider in order until one answers."""
+        """Ask the library's sources, in order or all at once, for one title."""
         external_ids = await mapper.expand(item.guids)
         # A binding names an id *scheme* ("anidb"), not a provider, and an
         # item may pin one per source. Running them through the same table a
         # GUID goes through is what lets a pin reach a source that speaks a
         # different scheme; without it an AniDB pin was accepted, stored, and
-        # then silently ignored at resolve time.
+        # then silently ignored at resolve time. Each pin is expanded on its
+        # own: the mapper stops as soon as a list holds a usable id, so
+        # expanding them together would leave an AniDB pin untranslated the
+        # moment a MAL pin sat beside it.
         binding = bindings.get(media_key(item)) or []
-        pinned = await mapper.expand(list(binding)) if binding else []
+        pinned: list[ExternalId] = []
+        for pin in binding:
+            for expanded in await mapper.expand([pin]):
+                if expanded not in pinned:
+                    pinned.append(expanded)
 
         request = LookupRequest(
             title=item.title,
@@ -437,44 +447,46 @@ class Pipeline:
 
         errors: list[str] = []
         providers: list[Provider] = list(pool.providers)
-        if pinned:
-            # Try whoever can honour the pin first. Comparing the binding's
-            # scheme to the provider's *name* left the order untouched for
-            # every scheme but "anilist", so a pinned id was tried in whatever
-            # order happened to be configured.
-            providers.sort(key=lambda p: not honours_pin(p))
 
-        live = pool.usable(providers)
         if pinned:
-            # A pinned id is worth one request even to a source that is
-            # standing down: answering from somewhere else would quietly
-            # override the match the user chose by hand.
-            live = [p for p in providers if p in live or honours_pin(p)]
-        #: A source that is standing down counts as silent without being asked.
-        silent = len(live) < len(providers)
+            # A pin says which record this title *is*, so no other source may
+            # answer it by guessing: the whole point of binding one by hand is
+            # to stop a title search from winning. That holds in both modes --
+            # protecting only the merge path left the default one free to
+            # write back the very match the binding overrode, whenever the
+            # pinned source happened to be rate limited.
+            live = [p for p in providers if honours_pin(p)]
+            if not live:
+                raise ProviderNotFound(
+                    f"pinned {', '.join(str(e) for e in binding)}, which none of "
+                    f"{', '.join(p.name for p in providers)} can read: remove the "
+                    "binding, or give the library a source that reads it"
+                )
+            # A pinned source is asked even while it stands down: there is no
+            # one else to ask.
+            silent = False
+        else:
+            live = pool.usable(providers)
+            #: A source standing down counts as silent without being asked.
+            silent = len(live) < len(providers)
         answered = False
 
-        if run.provider_mode == "merge":
-            if pinned:
-                # The pin says which record this is. Letting the other sources
-                # search by title would merge in the very match it overrode.
-                live = [p for p in live if honours_pin(p)]
-            replies = await asyncio.gather(*(self._ask(p, request, pool) for p in live))
-        else:
-            replies = []
-            for provider in live:
-                reply = await self._ask(provider, request, pool)
-                replies.append(reply)
-                if reply.result is not None:
-                    break
+        replies = await self._collect(live, request, pool, merge=run.provider_mode == "merge")
 
-        found = [r.result for r in replies if r.result is not None]
+        found = [r.result for r in replies if r.result is not None and r.result.genres]
         for reply in replies:
             if reply.result is None:
                 errors.append(reply.error)
                 answered = answered or reply.answered
                 silent = silent or reply.silent
-        if found:
+            elif not reply.result.genres:
+                answered = True
+                errors.append(f"{reply.result.provider}: nothing to write for this title")
+        if found and not (silent and run.provider_mode == "merge"):
+            # Merging is a promise that every source contributed. One of them
+            # being unreachable makes the answer incomplete, and caching it
+            # would freeze the title on a subset of its sources for good, so
+            # it is deferred instead and completed on the next run.
             return found[0] if len(found) == 1 else merge_results(found)
 
         detail = "; ".join(errors)
@@ -486,6 +498,45 @@ class Pipeline:
             # miss into a deferral for as long as any source stood down.
             raise ProviderUnavailable(detail or "no source was reachable")
         raise ProviderNotFound(detail or "no provider could resolve this title")
+
+    async def _collect(
+        self,
+        live: list[Provider],
+        request: LookupRequest,
+        pool: ProviderPool,
+        *,
+        merge: bool,
+    ) -> list["Reply"]:
+        """Put the question to the sources, all at once or until one answers."""
+        if not merge:
+            replies: list[Reply] = []
+            for provider in live:
+                reply = await self._ask(provider, request, pool)
+                replies.append(reply)
+                # An answer carrying nothing is no answer: letting it stop the
+                # chain hid the sources below it, and the item then failed for
+                # "no usable genres" without them ever being asked.
+                if reply.result is not None and reply.result.genres:
+                    break
+            return replies
+
+        # return_exceptions keeps one source's unexpected failure -- a
+        # malformed payload raising outside the ProviderError family -- from
+        # discarding what the others have already answered.
+        gathered = await asyncio.gather(
+            *(self._ask(p, request, pool) for p in live), return_exceptions=True
+        )
+        out: list[Reply] = []
+        for provider, answer in zip(live, gathered):
+            if isinstance(answer, asyncio.CancelledError):
+                raise answer
+            if isinstance(answer, BaseException):
+                log.error("%s raised on %r: %s", provider.name, request.title, answer)
+                pool.note_unreachable(provider, str(answer))
+                out.append(Reply(error=f"{provider.name}: {answer}", silent=True))
+            else:
+                out.append(answer)
+        return out
 
     @staticmethod
     async def _ask(provider: Provider, request: LookupRequest, pool: ProviderPool) -> "Reply":

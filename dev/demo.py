@@ -256,8 +256,8 @@ def install_fake_providers() -> None:
         await asyncio.sleep(random.uniform(0.12, 0.35))
         self.transport.request_count += 1
         rng = rng_for(f"{self.name}:{request.title}")
-        if request.pinned is not None:
-            source, provider_id = "binding", request.pinned.value
+        if request.pinned:
+            source, provider_id = "binding", request.pinned[0].value
         elif request.id_for(*self.guid_schemes) is not None:
             source, provider_id = "guid", request.id_for(*self.guid_schemes).value
         else:

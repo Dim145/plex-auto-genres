@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from .config import AppConfig, is_v1_layout, load_config
+from .config import KEYWORD_PROVIDERS, AppConfig, is_v1_layout, load_config
 from .errors import ConfigError
 from .models import MediaType
 from .store import Store
@@ -113,6 +113,20 @@ def run_doctor(config_path: str, store: Store, *, check_taxonomy: bool = True) -
         capped = (run.overrides is not None and run.overrides.max_genres is not None) or (
             defaults is not None and defaults.max_genres is not None
         )
+        if run.use_keywords and run.provider_mode == "fallback":
+            ahead = list(run.resolved_providers)
+            first_with_keywords = next(
+                (i for i, name in enumerate(ahead) if name in KEYWORD_PROVIDERS), len(ahead)
+            )
+            if first_with_keywords > 0:
+                checks.append(Check(
+                    f"keywords-behind:{run.library}", "warn",
+                    f"{run.library}: useKeywords, but {ahead[0]} answers first and has none",
+                    "Keywords come from "
+                    f"{', '.join(n for n in ahead if n in KEYWORD_PROVIDERS)}, which this "
+                    "library only reaches when the sources before it miss. Put one first, "
+                    "or set providerMode to merge.",
+                ))
         if run.use_keywords and not capped:
             checks.append(Check(
                 f"keywords-uncapped:{run.library}", "warn",

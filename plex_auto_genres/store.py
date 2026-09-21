@@ -239,23 +239,35 @@ class Store:
         columns = self._conn.execute("PRAGMA table_info(bindings)").fetchall()
         if not columns or any(c["name"] == "provider" and c["pk"] for c in columns):
             return
-        self._conn.executescript(
-            """
-            CREATE TABLE bindings_widened (
-                library     TEXT NOT NULL,
-                media_key   TEXT NOT NULL,
-                provider    TEXT NOT NULL,
-                provider_id TEXT NOT NULL,
-                note        TEXT,
-                created_at  REAL NOT NULL,
-                PRIMARY KEY (library, media_key, provider)
-            );
-            INSERT INTO bindings_widened
-                SELECT library, media_key, provider, provider_id, note, created_at FROM bindings;
-            DROP TABLE bindings;
-            ALTER TABLE bindings_widened RENAME TO bindings;
-            """
-        )
+        # One transaction, and no executescript: that helper commits whatever
+        # is pending before it runs, which would leave a window between the
+        # DROP and the RENAME where a kill -- a container restart is enough --
+        # loses every binding silently, since the schema then recreates an
+        # empty table that looks already migrated.
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            # A previous attempt that died mid-way leaves this behind, and
+            # CREATE would then fail on every subsequent open.
+            self._conn.execute("DROP TABLE IF EXISTS bindings_widened")
+            self._conn.execute(
+                """
+                CREATE TABLE bindings_widened (
+                    library     TEXT NOT NULL,
+                    media_key   TEXT NOT NULL,
+                    provider    TEXT NOT NULL,
+                    provider_id TEXT NOT NULL,
+                    note        TEXT,
+                    created_at  REAL NOT NULL,
+                    PRIMARY KEY (library, media_key, provider)
+                )
+                """
+            )
+            self._conn.execute(
+                "INSERT INTO bindings_widened "
+                "SELECT library, media_key, provider, provider_id, note, created_at FROM bindings"
+            )
+            self._conn.execute("DROP TABLE bindings")
+            self._conn.execute("ALTER TABLE bindings_widened RENAME TO bindings")
         log.info("Bindings widened: an item can now pin one id per source.")
 
     def close(self) -> None:

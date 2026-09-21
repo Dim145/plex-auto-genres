@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
 
-from ..models import MediaItem, TagField
+from ..models import MediaItem, TagField, fold
 from ..store import Store
 
 log = logging.getLogger(__name__)
@@ -78,16 +78,18 @@ def plan_tags(
         desired = prefixed
     else:
         desired = list(current)
-        known = {t.casefold() for t in desired}
+        known = {fold(t) for t in desired}
         for tag in prefixed:
-            if tag.casefold() not in known:
-                known.add(tag.casefold())
+            if fold(tag) not in known:
+                known.add(fold(tag))
                 desired.append(tag)
-    # De-duplicate case-insensitively while keeping first-seen order.
+    # De-duplicate the same way the genre rules do, on letters and digits
+    # alone: comparing case only would append "Boys Love" beside the
+    # "Boys' Love" a previous run wrote, which is two collections in Plex.
     out: list[str] = []
     seen: set[str] = set()
     for tag in desired:
-        key = tag.casefold()
+        key = fold(tag)
         if key not in seen:
             seen.add(key)
             out.append(tag)
@@ -262,13 +264,13 @@ def sort_collections(
     the whole section list every time; here the collections are read once and
     matched in memory.
     """
-    existing = {c.title.casefold(): c for c in section.collections()}
+    existing = {fold(c.title): c for c in section.collections()}
     updated = 0
     not_found: list[str] = []
     for name in names:
         wanted = name.strip()
-        collection = existing.get(wanted.casefold()) or existing.get(
-            f"{collection_prefix}{wanted}".casefold()
+        collection = existing.get(fold(wanted)) or existing.get(
+            fold(f"{collection_prefix}{wanted}")
         )
         if collection is None:
             not_found.append(name)

@@ -7,6 +7,7 @@ loops. The pydantic models live in :mod:`plex_auto_genres.config`.
 
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -32,6 +33,26 @@ class TagField(str, Enum):
 
     GENRE = "genre"
     COLLECTION = "collection"
+
+
+def fold(name: str) -> str:
+    """A comparison key for a genre or tag: what two spellings share.
+
+    Case, accents, punctuation and spacing all go, so "Boys Love" and
+    "Boys' Love" stop becoming two collections in Plex, and a rename rule
+    written as "sci-fi" matches "Sci Fi" as well. Two words that genuinely
+    differ -- "Comedy" and "Comedie" -- still need a rename rule to meet.
+
+    Letters are whatever the writing system calls letters: an earlier cut kept
+    ASCII alphanumerics alone, which folded every Japanese, Cyrillic, Greek or
+    Korean genre to the empty string and dropped it -- so a library reading
+    TMDB in one of those languages lost every genre it was given.
+    """
+    decomposed = unicodedata.normalize("NFKD", name.casefold())
+    kept = "".join(c for c in decomposed if c.isalnum() and not unicodedata.combining(c))
+    # Recompose: NFKD splits Hangul into jamo, and a key nobody can read is a
+    # key nobody can debug. Latin letters lost their accents above and stay put.
+    return unicodedata.normalize("NFKC", kept)
 
 
 #: Provider id schemes we can read straight out of a Plex GUID, in the order we

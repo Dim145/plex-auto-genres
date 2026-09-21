@@ -45,23 +45,31 @@ export function LibraryEditor({
   const hasKeywords = chain.some((p) => KEYWORD_SOURCES.includes(p));
   const merging = lib.providerMode === "merge";
 
-  /** Set the source chain, dropping keywords with the source that had them. */
-  const setProviders = (next: string[] | null) =>
+  /**
+   * Set the source chain, dropping what it can no longer support: keywords
+   * with the source that had them, and the merge mode with the second source.
+   * A setting left behind would keep changing the run with no control left to
+   * see or clear it.
+   */
+  const setProviders = (next: string[] | null) => {
+    const chosen = sourceChain(next, lib.type);
     onChange({
       ...lib,
       providers: next,
-      useKeywords:
-        sourceChain(next, lib.type).some((p) => KEYWORD_SOURCES.includes(p)) && lib.useKeywords,
+      useKeywords: chosen.some((p) => KEYWORD_SOURCES.includes(p)) && lib.useKeywords,
+      providerMode: chosen.length > 1 ? lib.providerMode : "fallback",
     });
+  };
 
   const changeType = (type: MediaType) => {
     onChange({
       ...lib,
       type,
-      // Providers and keywords are type-specific; reset rather than carry
-      // an invalid combination across.
+      // Providers, keywords and the combining mode are type-specific; reset
+      // rather than carry an invalid combination across.
       providers: null,
       useKeywords: type === "anime" ? false : lib.useKeywords,
+      providerMode: "fallback",
     });
   };
 

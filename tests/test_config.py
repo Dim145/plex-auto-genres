@@ -8,7 +8,7 @@ import pytest
 
 from plex_auto_genres.config import AppConfig, GenreRules, load_config, migrate_v1
 from plex_auto_genres.errors import ConfigError
-from plex_auto_genres.models import MediaType
+from plex_auto_genres.models import MediaType, fold
 
 V1 = {
     "general_settings": {"genres": {
@@ -293,3 +293,65 @@ def test_the_default_provider_mode_leaves_the_fingerprint_alone():
     assert fingerprint(providers=["jikan", "anilist"], providerMode="merge") != fingerprint(
         providers=["jikan", "anilist"]
     ), "merging writes a different genre list, so its cache is not the same"
+
+
+def test_folding_keeps_every_writing_system():
+    """An ASCII-only fold dropped whole libraries: TMDB answers in the
+    language it is asked in, and those names are all a library has."""
+    assert fold("日常") == "日常"
+    assert fold("Романтика") == "романтика"
+    assert fold("Θρίλερ") == "θριλερ"
+    assert fold("드라마") == "드라마"
+
+    rules = GenreRules()
+    assert rules.apply(["アクション", "ドラマ"]) == ["アクション", "ドラマ"]
+    assert GenreRules(replace={"コメディ": "Comedy"}).apply(["コメディ"]) == ["Comedy"]
+
+
+def test_two_rename_rules_that_mean_the_same_thing_are_refused():
+    """Folded keys made them one entry, and the loser vanished in silence."""
+    with pytest.raises(Exception, match="the same rule"):
+        GenreRules(replace={"sci-fi": "Science Fiction", "Sci Fi": "SciFi"})
+
+
+def test_the_tmdb_language_is_part_of_the_fingerprint():
+    """It decides the very strings written to Plex, so changing it re-tags."""
+    def fingerprint(language: str) -> str:
+        config = AppConfig.model_validate({
+            "version": 2,
+            "libraries": [{"library": "A", "type": "standard-movie", "useGenres": True}],
+            "providers": {"tmdb_language": language},
+        })
+        return config.fingerprint(config.libraries[0])
+
+    assert fingerprint("en-US") != fingerprint("fr-FR")
+    assert fingerprint("en-US") == AppConfig.model_validate({
+        "version": 2,
+        "libraries": [{"library": "A", "type": "standard-movie", "useGenres": True}],
+    }).fingerprint(AppConfig.model_validate({
+        "version": 2,
+        "libraries": [{"library": "A", "type": "standard-movie", "useGenres": True}],
+    }).libraries[0]), "the default must not disturb an existing install"
+
+
+def test_doctor_warns_when_the_keyword_source_is_never_reached(tmp_path, monkeypatch):
+    """Falling back stops at the first source that answers, so keywords behind
+    one that has none are a toggle that reports itself as on and does nothing."""
+    from plex_auto_genres.doctor import run_doctor
+    from plex_auto_genres.store import Store
+
+    monkeypatch.setenv("PLEX_BASE_URL", "http://plex:32400")
+    monkeypatch.setenv("PLEX_TOKEN", "t")
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"version": 2, "libraries": [
+        {"library": "Behind", "type": "anime", "useGenres": True, "useKeywords": True,
+         "providers": ["jikan", "anilist"]},
+        {"library": "First", "type": "anime", "useGenres": True, "useKeywords": True,
+         "providers": ["anilist", "jikan"]},
+        {"library": "Merged", "type": "anime", "useGenres": True, "useKeywords": True,
+         "providers": ["jikan", "anilist"], "providerMode": "merge"},
+    ]}))
+
+    warned = {c.id for c in run_doctor(path, Store(tmp_path / "s.db"), check_taxonomy=False).checks
+              if c.id.startswith("keywords-behind")}
+    assert warned == {"keywords-behind:Behind"}

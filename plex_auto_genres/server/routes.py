@@ -592,7 +592,7 @@ async def search_candidates(
 
 @router.post("/bindings", response_model=schemas.BindingView, status_code=201)
 async def create_binding(request: Request, body: schemas.BindingIn) -> schemas.BindingView:
-    """Pin an item to a provider id. Replaces an existing binding for that item."""
+    """Pin an item to a source's id, replacing that source's pin if it has one."""
     state = _state(request)
     config = _config_or_503(state)
     entry = config.find(body.library)

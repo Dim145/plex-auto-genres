@@ -819,3 +819,103 @@ async def test_two_pinned_ids_let_a_merge_use_both_catalogues(store: Store):
     assert report.written == 1 and handle.last_tags == ["Drama", "Animation"]
     assert not searches.called, "each source was asked by the id it was handed"
     assert store.get_state("Animes", "mal://1").provider == "anilist+tmdb"
+
+
+@respx.mock
+async def test_a_pin_is_never_overridden_by_another_source_guessing(store: Store, monkeypatch):
+    """The protection existed only in merge mode, leaving the default one
+    free to write back the very match the binding was created to override."""
+    unmetered(monkeypatch, "jikan", "anilist")
+    monkeypatch.setattr(HttpTransport, "_sleep_backoff", staticmethod(_no_backoff))
+    respx.get("https://api.jikan.moe/v4/anime/19").mock(return_value=httpx.Response(504))
+    anilist = respx.post("https://graphql.anilist.co").mock(return_value=anilist_ok(("Wrong",)))
+
+    handle = guid_item()
+    store.set_binding("Animes", "mal://1", "mal", "19")
+    config = make_config(providers=["jikan", "anilist"], concurrency=1)
+
+    report = await Pipeline(config, store, FakeServer([handle])).tag_library(config.libraries[0])
+
+    # AniList reads MAL ids too, so it is asked -- by id, never by title.
+    assert anilist.called
+    body = anilist.calls[0].request.content.decode()
+    assert '"malId": 19' in body or '"malId":19' in body
+    assert report.written + report.deferred == 1
+
+
+@respx.mock
+async def test_a_pin_no_source_can_read_says_so(store: Store):
+    """A chain edited after the fact leaves the pin stranded; resolving the
+    title by search anyway would be the bug the pin exists to prevent."""
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime\b").mock(return_value=jikan_ok())
+
+    handle = guid_item()
+    store.set_binding("Animes", "mal://1", "tmdb", "7")   # tmdb is not in the chain
+    config = make_config(providers=["jikan"])
+
+    report = await Pipeline(config, store, FakeServer([handle])).tag_library(config.libraries[0])
+
+    assert report.failed == 1 and report.written == 0
+    assert "tmdb://7" in report.failures[0][1] and "jikan" in report.failures[0][1]
+
+
+@respx.mock
+async def test_a_source_with_nothing_to_say_does_not_stop_the_chain(store: Store):
+    """AniList answers with tags alone under useKeywords; a title with none
+    used to end the chain and fail for "no usable genres"."""
+    respx.post("https://graphql.anilist.co").mock(
+        return_value=httpx.Response(200, json={"data": {"Media": {
+            "id": 1, "idMal": 1, "title": {"romaji": "Anime"}, "genres": ["Action"],
+            "tags": [{"name": "Faint", "rank": 10, "isGeneralSpoiler": False}],
+            "averageScore": 80, "startDate": {"year": 1998},
+            "siteUrl": "https://anilist.co/anime/1",
+        }}})
+    )
+    respx.get("https://api.themoviedb.org/3/search/tv").mock(
+        return_value=httpx.Response(200, json={"results": [{"id": 7, "name": "Anime"}]})
+    )
+    respx.get("https://api.themoviedb.org/3/tv/7").mock(
+        return_value=httpx.Response(200, json={
+            "id": 7, "name": "Anime", "genres": [{"name": "Animation"}],
+            "keywords": {"results": [{"name": "space western"}]}})
+    )
+    handle = guid_item()
+    config = make_config(tmdb_key="k", providers=["anilist", "tmdb"],
+                         useKeywords=True, clearGenres=True)
+
+    report = await Pipeline(config, store, FakeServer([handle])).tag_library(config.libraries[0])
+
+    assert report.written == 1 and handle.last_tags == ["space western"]
+
+
+@respx.mock
+async def test_a_merge_missing_a_source_is_deferred_not_cached(store: Store, monkeypatch):
+    """Caching it would freeze the title on a subset of its sources for good."""
+    unmetered(monkeypatch, "jikan", "anilist")
+    monkeypatch.setattr(HttpTransport, "_sleep_backoff", staticmethod(_no_backoff))
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d+").mock(return_value=jikan_ok())
+    respx.post("https://graphql.anilist.co").mock(return_value=httpx.Response(504))
+
+    handle = guid_item()
+    config = make_config(providers=["jikan", "anilist"], providerMode="merge")
+
+    report = await Pipeline(config, store, FakeServer([handle])).tag_library(config.libraries[0])
+
+    assert (report.deferred, report.written) == (1, 0)
+    assert store.get_state("Animes", "mal://1") is None, "nothing cached, so it completes later"
+
+
+def test_a_merged_result_takes_its_rating_from_the_source_that_names_it():
+    """Identity and score must come from one record: a rating beside another
+    catalogue's id sends anyone auditing it to the wrong entry."""
+    from plex_auto_genres.models import ProviderResult
+    from plex_auto_genres.pipeline import merge_results
+
+    first = ProviderResult(provider="jikan", provider_id="1", title="A",
+                           genres=["Action"], score=None)
+    second = ProviderResult(provider="tmdb", provider_id="99", title="A",
+                            genres=["Animation"], score=8.4)
+
+    merged = merge_results([first, second])
+    assert merged.provider_id == "1" and merged.score is None
+    assert merged.genres == ["Action", "Animation"]

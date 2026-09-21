@@ -46,8 +46,14 @@ jobs:
 
       - name: Refuse anything that is not a tag
         if: github.ref_type != 'tag'
+        # Values reach the shell through the environment, never through
+        # ${{ }} interpolation: a ref named `"; curl … | sh; #` would
+        # otherwise be pasted straight into this script.
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
         run: |
-          echo "::error::Publish from a tag. '${{ github.ref_name }}' is a ${{ github.ref_type }};" \
+          echo "::error::Publish from a tag. '$REF_NAME' is a $REF_TYPE;" \
                "the Run workflow dropdown lists tags as well as branches."
           exit 1
 
@@ -76,16 +82,20 @@ jobs:
 
       - name: Decide whether this moves 'latest'
         id: latest
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PRERELEASE: ${{ github.event.release.prerelease }}
+          WANTED: ${{ inputs.latest }}
         run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
+          if [ "$EVENT_NAME" = "release" ]; then
             # A pre-release is published, but nobody gets it by pulling `latest`.
-            if [ "${{ github.event.release.prerelease }}" = "true" ]; then
+            if [ "$PRERELEASE" = "true" ]; then
               value=false
             else
               value=true
             fi
           else
-            value="${{ inputs.latest }}"
+            value="$WANTED"
           fi
           echo "value=$value" >> "$GITHUB_OUTPUT"
           echo "latest: $value"

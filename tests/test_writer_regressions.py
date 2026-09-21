@@ -186,3 +186,18 @@ def test_undo_clears_a_rating_that_did_not_exist(store: Store, item):
     assert writer.set_rating(item, 8.5)
     assert undo_run(_server_for(item.handle), store, "run1") == (1, 0)
     assert item.handle.ratings[-1] == -1.0, "plexapi's 'unrated'"
+
+
+def test_a_tag_already_in_plex_is_matched_on_letters_not_punctuation():
+    """The rules fold names, so the writer has to as well. Comparing case
+    only appended "Boys Love" beside the "Boys' Love" an earlier run wrote,
+    which is exactly the two collections the folding exists to prevent."""
+    kept = plan_tags(current=["Boys' Love", "Action"], incoming=["Boys Love", "Drama"],
+                     clear=False, prefix="")
+    assert kept == ["Boys' Love", "Action", "Drama"]
+
+
+def test_folding_does_not_merge_names_that_only_look_alike():
+    assert plan_tags(current=["Action"], incoming=["Adventure"], clear=False, prefix="") == [
+        "Action", "Adventure"
+    ]

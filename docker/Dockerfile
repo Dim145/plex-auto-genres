@@ -68,6 +68,12 @@ ENV PYTHONUNBUFFERED=1 \
 # hadolint ignore=DL3018
 RUN apk add --no-cache tzdata su-exec
 
+# The base image ships pip; nothing here runs it. Dropping it takes 6.7 MB and
+# a package installer out of a container that talks to the internet, and with
+# them every pip advisory an image scanner would otherwise report against a
+# release that cannot act on one.
+RUN python -m pip uninstall --yes pip && rm -f /usr/local/bin/pip /usr/local/bin/pip3*
+
 COPY --from=builder /install /usr/local
 COPY --from=ui /ui/dist /app/static
 COPY docker/entrypoint.sh /entrypoint.sh
