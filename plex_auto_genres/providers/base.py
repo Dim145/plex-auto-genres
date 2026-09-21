@@ -102,6 +102,8 @@ class HttpTransport:
                 await self._sleep_backoff(attempt)
                 continue
 
+            _observe_rate_limit(response, self._limiter)
+
             if response.status_code == 429:
                 asked = _parse_retry_after(response)
                 paused = await self._limiter.penalise(
@@ -155,6 +157,17 @@ class HttpTransport:
         high = min(2.0 * step, 30.0)
         # Not security-relevant: a timing jitter, so the PRNG is the right tool.
         await asyncio.sleep(random.uniform(low, high))  # nosec B311
+
+
+def _observe_rate_limit(response: httpx.Response, limiter: CompositeLimiter) -> None:
+    """Adopt the per-minute allowance a provider advertises on its responses."""
+    raw = response.headers.get("X-RateLimit-Limit")
+    if not raw:
+        return
+    try:
+        limiter.observe_limit(float(raw))
+    except ValueError:
+        log.debug("unreadable X-RateLimit-Limit: %r", raw)
 
 
 def _parse_retry_after(response: httpx.Response) -> float | None:

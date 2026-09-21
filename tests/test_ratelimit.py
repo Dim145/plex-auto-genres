@@ -8,6 +8,7 @@ import time
 import pytest
 
 from plex_auto_genres.ratelimit import (
+    ANILIST_LIMITS,
     JIKAN_LIMITS,
     MAX_PENALTY_S,
     PENALTY_ESCALATION_MAX,
@@ -134,3 +135,34 @@ async def test_retrying_one_refusal_does_not_climb_the_ladder():
 async def test_a_cooldown_is_never_longer_than_the_ceiling():
     limiter = LimitSpec(((100, 1.0),)).build()
     assert await limiter.penalise(3600.0) == pytest.approx(MAX_PENALTY_S, abs=0.05)
+
+
+async def test_a_provider_that_advertises_its_limit_is_taken_at_its_word():
+    """AniList publishes 90 a minute and has been serving 30 for years; the
+    header on every response is the only figure that is actually current."""
+    limiter = LimitSpec(((90, 60.0),)).build()
+    limiter.observe_limit(30.0)
+
+    # Five seconds' worth of the new rate, not the old one.
+    await asyncio.gather(*(limiter.acquire() for _ in range(2)))
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(limiter.acquire(), timeout=0.3)
+
+
+async def test_an_advertised_limit_can_relax_the_pacing_again():
+    limiter = LimitSpec(((30, 60.0),)).build()
+    limiter.observe_limit(90.0)
+    await asyncio.gather(*(limiter.acquire() for _ in range(7)))   # 5s of 90/min
+
+
+async def test_a_nonsense_advertised_limit_is_ignored():
+    limiter = LimitSpec(((30, 60.0),)).build()
+    for value in (0.0, -5.0):
+        limiter.observe_limit(value)
+    await asyncio.gather(*(limiter.acquire() for _ in range(2)))
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(limiter.acquire(), timeout=0.3)
+
+
+def test_anilist_is_paced_at_what_it_serves_today():
+    assert ANILIST_LIMITS.windows == ((30, 60.0),)

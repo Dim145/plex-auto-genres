@@ -10,9 +10,12 @@ to the allowance and no further.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 import weakref
 from dataclasses import dataclass
+
+log = logging.getLogger(__name__)
 
 
 class TokenBucket:
@@ -33,6 +36,25 @@ class TokenBucket:
         self._tokens = float(self._burst)
         self._updated = time.monotonic()
         self._lock = asyncio.Lock()
+
+    @property
+    def period(self) -> float:
+        return self._period
+
+    def retune(self, rate: float) -> None:
+        """Adopt a rate the provider itself advertises.
+
+        A published limit is a promise about a normal day; the header on every
+        response is what the service is serving *now*. AniList, for one, has
+        been answering at a third of its documented rate for a long while.
+        """
+        if rate <= 0 or rate == self._rate:
+            return
+        self._refill()
+        log.info("rate limit retuned: %g -> %g per %gs", self._rate, rate, self._period)
+        self._rate = rate
+        self._burst = _burst_for(rate, self._period)
+        self._tokens = min(self._tokens, self._burst)
 
     def _refill(self) -> None:
         now = time.monotonic()
@@ -117,6 +139,12 @@ class CompositeLimiter:
         if self._streak:
             self._streak -= 1
 
+    def observe_limit(self, per_minute: float) -> None:
+        """Take the provider at its word about how many requests a minute."""
+        for bucket in self._buckets:
+            if bucket.period == 60.0:
+                bucket.retune(per_minute)
+
 
 #: How much of a long window may be spent in one go. Handing out a whole
 #: minute's allowance as a single burst is what trips a provider's own
@@ -167,7 +195,11 @@ def shared_limiter(name: str, spec: LimitSpec) -> CompositeLimiter:
 
 #: https://docs.api.jikan.moe/#section/Information/Rate-Limiting -- 3/s, 60/min.
 JIKAN_LIMITS = LimitSpec(((3, 1.0), (60, 60.0)))
-#: AniList allows 90 requests/minute on the public endpoint.
-ANILIST_LIMITS = LimitSpec(((90, 60.0),))
+#: https://docs.anilist.co/guide/rate-limiting -- 90/min on paper, but the API
+#: has been "in a degraded state" and serving 30 for a long time, which is what
+#: its X-RateLimit-Limit header reports. Start at what it actually serves; the
+#: transport reads that header and retunes if the real figure differs, so a
+#: restored AniList speeds back up without waiting for a release.
+ANILIST_LIMITS = LimitSpec(((30, 60.0),))
 #: TMDB removed its hard cap but still throttles; ~40/s is comfortably safe.
 TMDB_LIMITS = LimitSpec(((40, 1.0),))

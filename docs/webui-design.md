@@ -633,6 +633,22 @@ driving the real console: the create route echoed back the item's *first* pin ra
 than the one just made, and the picker froze its id-scheme choice at mount, before the
 list of allowed schemes had arrived from the API.
 
+### Paced by what a source serves, not what it published — done
+
+Asked whether an AniList API key would buy a higher rate limit, the way `TMDB_API_KEY`
+does for TMDB. It would not: AniList's OAuth exists to read and write a user's own
+lists, scopes and all, and its rate-limit raises are a manual email request the
+maintainers say they are not currently accepting. But the question exposed a real fault
+of ours. AniList documents 90 requests a minute and has been "in a degraded state"
+serving 30 for a long time — verified against the live endpoint, whose
+`X-RateLimit-Limit` reads `30` — while our limiter was built for 90. Being paced three
+times too fast is why a library reading it got refused.
+
+So the pacing now follows the source rather than the documentation: `ANILIST_LIMITS`
+starts at what AniList serves today, and every response's `X-RateLimit-Limit` retunes
+the minute bucket, up or down. A restored AniList speeds back up on its first answer,
+with no release and no configuration.
+
 ### Next
 
 Decide where secrets should live if they are ever to be edited from the UI — the

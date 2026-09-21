@@ -202,7 +202,11 @@ failed: nothing is written to the cache, so the next run picks them straight
 back up instead of holding them behind the hour-long retry backoff a real
 failure earns.
 
-Three things keep a bad day from becoming a bad library:
+Four things keep a bad day from becoming a bad library:
+
+- Each source is paced at what it says it is serving, not at what it published.
+  A provider that reports `X-RateLimit-Limit` on its responses is taken at its
+  word, and the pacing follows it up or down without waiting for a release.
 
 - Requests are paced to a few seconds' worth of each published limit at a time,
   rather than spending a whole minute's allowance in its first seconds.
@@ -211,6 +215,13 @@ Three things keep a bad day from becoming a bad library:
 - A source that has stopped answering is stood down for a moment, so the rest
   of the run goes straight to the next one. With nothing left to ask, the run
   stops early and says so, rather than grinding through thousands of titles.
+
+**AniList in particular.** Its documentation says 90 requests a minute; the API
+has been "in a degraded state" for a long time and actually serves 30, which is
+what its header reports. There is no API key that changes this: AniList's OAuth
+is for reading a user's private lists and writing to them, not for throughput,
+and a rate-limit raise is a manual request its maintainers are currently not
+accepting. Pacing to the advertised figure is the whole of the remedy.
 
 Listing a second source is what makes all of this invisible. For anime,
 MyAnimeList first and AniList behind it covers almost everything, and TMDB can
