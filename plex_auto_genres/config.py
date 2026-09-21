@@ -394,7 +394,6 @@ class AppConfig(BaseModel):
             "library": run.library,
             "type": run.type.value,
             "providers": list(run.resolved_providers),
-            "provider_mode": run.provider_mode,
             "use_genres": run.use_genres,
             "use_keywords": run.use_keywords,
             "clear_genres": run.clear_genres,
@@ -403,6 +402,11 @@ class AppConfig(BaseModel):
             "replace": dict(sorted(rules.replace.items())),
             "max_genres": rules.max_genres,
         }
+        if run.provider_mode != "fallback":
+            # Only a non-default mode joins the hash. Adding a key that every
+            # library carries would change every fingerprint ever computed and
+            # send a whole install back through its libraries for nothing.
+            payload["provider_mode"] = run.provider_mode
         blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(blob.encode()).hexdigest()[:16]
 

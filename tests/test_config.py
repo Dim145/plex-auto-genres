@@ -275,3 +275,21 @@ def test_spelling_variants_collapse_into_one_genre():
 def test_a_rename_reaches_a_genre_whatever_its_spelling():
     rules = GenreRules(replace={"sci fi": "Science Fiction"})
     assert rules.apply(["Sci-Fi"]) == ["Science Fiction"]
+
+
+def test_the_default_provider_mode_leaves_the_fingerprint_alone():
+    """Adding a field every library carries would invalidate every cache.
+
+    Only a mode that is not the old behaviour joins the hash, so upgrading does
+    not send a whole install back through its libraries for nothing.
+    """
+    def fingerprint(**library) -> str:
+        base = {"library": "A", "type": "anime", "useGenres": True}
+        base.update(library)
+        config = AppConfig.model_validate({"version": 2, "libraries": [base]})
+        return config.fingerprint(config.libraries[0])
+
+    assert fingerprint() == fingerprint(providerMode="fallback")
+    assert fingerprint(providers=["jikan", "anilist"], providerMode="merge") != fingerprint(
+        providers=["jikan", "anilist"]
+    ), "merging writes a different genre list, so its cache is not the same"
