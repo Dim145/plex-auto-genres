@@ -303,6 +303,11 @@ keyword at all, so a source with none for a title falls back to its own genres r
 than leaving it untagged — turn the setting on and a merged library still writes
 something for every title.
 
+AniList's tags carry the share of its community that agreed with them, and only those
+at 70% or more are written. That is why a tag you can see on its page may not reach
+Plex. `ANILIST_TAG_RANK` moves the bar: set it to `20` to take much more of what
+AniList knows, and accept the noise that comes with it.
+
 ### When two sources spell one genre differently
 
 Genres are compared on letters and digits alone, so `Boys Love`, `Boys' Love` and

@@ -620,3 +620,35 @@ async def test_keywords_fall_back_to_a_source_own_genres_when_it_has_none():
 
     assert anilist.genres == ["Action"], "its own genres, not its sub-threshold tags"
     assert tmdb.genres == ["Animation"]
+
+
+@respx.mock
+async def test_the_anilist_tag_threshold_is_the_users_to_set():
+    """AniList lists tags down to a few percent and its own page shows them.
+    Seventy was a guess nobody could change, so a tag a user could see was
+    dropped without a word."""
+    respx.post("https://graphql.anilist.co").mock(
+        return_value=httpx.Response(200, json={"data": {"Media": {
+            "id": 1, "idMal": 1, "title": {"romaji": "A"}, "genres": [],
+            "tags": [{"name": "Female Harem", "rank": 20, "isGeneralSpoiler": False},
+                     {"name": "Space", "rank": 85, "isGeneralSpoiler": False}],
+            "averageScore": 80, "startDate": {"year": 2020},
+            "siteUrl": "https://anilist.co/anime/1"}}})
+    )
+    wanted = LookupRequest("A", 2020, MediaType.ANIME, use_keywords=True)
+    pinned = ExternalId("anilist", "1")
+
+    strict = await AniListProvider(transport("anilist")).fetch_by_id(pinned, wanted)
+    generous = await AniListProvider(transport("anilist"), tag_rank=20).fetch_by_id(
+        pinned, wanted
+    )
+
+    assert strict.genres == ["Space"]
+    assert generous.genres == ["Female Harem", "Space"]
+
+
+def test_the_tag_threshold_travels_from_the_settings():
+    from plex_auto_genres.config import ProviderSettings
+
+    assert ProviderSettings().anilist_tag_rank == 70
+    assert ProviderSettings(anilist_tag_rank=15).anilist_tag_rank == 15

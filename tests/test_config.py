@@ -355,3 +355,17 @@ def test_doctor_warns_when_the_keyword_source_is_never_reached(tmp_path, monkeyp
     warned = {c.id for c in run_doctor(path, Store(tmp_path / "s.db"), check_taxonomy=False).checks
               if c.id.startswith("keywords-behind")}
     assert warned == {"keywords-behind:Behind"}
+
+
+def test_the_anilist_tag_threshold_is_part_of_the_fingerprint():
+    """It decides which tags are written, so moving it has to re-tag."""
+    def fingerprint(rank: int) -> str:
+        config = AppConfig.model_validate({
+            "version": 2,
+            "libraries": [{"library": "A", "type": "anime", "useGenres": True,
+                           "useKeywords": True, "providers": ["anilist"]}],
+            "providers": {"anilist_tag_rank": rank},
+        })
+        return config.fingerprint(config.libraries[0])
+
+    assert fingerprint(70) != fingerprint(20)

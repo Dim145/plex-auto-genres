@@ -318,6 +318,10 @@ class ProviderSettings(BaseModel):
 
     tmdb_api_key: str | None = None
     tmdb_language: str = "en-US"
+    #: How much of AniList's community has to agree with a tag before it
+    #: counts. AniList shows them all, down to a few percent; taking them all
+    #: is noise, and 70 was a guess made with no way for anyone to change it.
+    anilist_tag_rank: int = Field(default=70, ge=0, le=100)
     #: Concurrent in-flight requests per provider.
     concurrency: int = Field(default=4, ge=1, le=32)
     #: Total attempts per item before it is recorded as failed.
@@ -420,6 +424,9 @@ class AppConfig(BaseModel):
         # install back through its libraries for nothing.
         if run.provider_mode != "fallback":
             payload["provider_mode"] = run.provider_mode
+        if self.providers.anilist_tag_rank != 70:
+            # It decides which tags are written, so changing it re-tags.
+            payload["anilist_tag_rank"] = self.providers.anilist_tag_rank
         if self.providers.tmdb_language != "en-US":
             # TMDB answers in this language, so it decides the very strings
             # written to Plex; changing it has to re-tag the library.
@@ -449,6 +456,7 @@ def _providers_from_env() -> ProviderSettings:
     return ProviderSettings(
         tmdb_api_key=os.getenv("TMDB_API_KEY") or None,
         tmdb_language=os.getenv("TMDB_LANGUAGE", "en-US"),
+        anilist_tag_rank=int(os.getenv("ANILIST_TAG_RANK", "70")),
         concurrency=int(os.getenv("PAG_CONCURRENCY", "4")),
         max_attempts=int(os.getenv("PAG_MAX_ATTEMPTS", "3")),
     )

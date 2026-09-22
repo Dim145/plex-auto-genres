@@ -203,6 +203,8 @@ def build_providers(
             built.append(
                 TmdbProvider(transport, settings.tmdb_api_key or "", settings.tmdb_language)
             )
+        elif name == "anilist":
+            built.append(AniListProvider(transport, tag_rank=settings.anilist_tag_rank))
         else:
             built.append(_CLASSES[name](transport))
     return ProviderPool(built, client)

@@ -45,7 +45,9 @@ query ($search: String, $seasonYear: Int) {{
 }}
 """
 
-#: Community tags below this agreement percentage are noise.
+#: Community tags below this agreement percentage are noise, unless the user
+#: says otherwise: AniList lists them down to a few percent, and what counts as
+#: noise depends on the library. Overridden per install by ANILIST_TAG_RANK.
 TAG_RANK_THRESHOLD = 70
 
 
@@ -60,6 +62,10 @@ class AniListProvider(Provider):
     #: It reports what it is serving right now, per minute, and that figure
     #: has been a third of the documented one for a long time.
     limit_window = 60.0
+
+    def __init__(self, transport, tag_rank: int = TAG_RANK_THRESHOLD) -> None:
+        super().__init__(transport)
+        self._tag_rank = tag_rank
 
     async def _graphql(self, query: str, variables: dict) -> dict:
         response = await self.transport.request(
@@ -142,7 +148,7 @@ class AniListProvider(Provider):
             for tag in media.get("tags") or []
             if tag.get("name")
             and not tag.get("isGeneralSpoiler")
-            and (tag.get("rank") or 0) >= TAG_RANK_THRESHOLD
+            and (tag.get("rank") or 0) >= self._tag_rank
         ]
         # AniList's genre list is a dozen broad buckets, and for a whole
         # library it says little. useKeywords takes the tags on their own --
