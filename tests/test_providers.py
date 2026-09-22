@@ -591,3 +591,32 @@ async def test_a_header_from_a_source_that_never_sends_one_is_ignored():
 
     # Untouched: five seconds of 90 a minute is seven in stock, one spent.
     await asyncio.gather(*(limiter.acquire() for _ in range(6)))
+
+
+@respx.mock
+async def test_keywords_fall_back_to_a_source_own_genres_when_it_has_none():
+    """Plenty of titles carry no keyword at all. Handing back nothing tagged
+    them with nothing and recorded a failure, which serves nobody."""
+    respx.post("https://graphql.anilist.co").mock(
+        return_value=httpx.Response(200, json={"data": {"Media": {
+            "id": 1, "idMal": 1, "title": {"romaji": "A"}, "genres": ["Action"],
+            "tags": [{"name": "Faint", "rank": 10, "isGeneralSpoiler": False}],
+            "averageScore": 80, "startDate": {"year": 2020},
+            "siteUrl": "https://anilist.co/anime/1"}}})
+    )
+    respx.get("https://api.themoviedb.org/3/tv/7").mock(
+        return_value=httpx.Response(200, json={
+            "id": 7, "name": "A", "genres": [{"name": "Animation"}],
+            "keywords": {"results": []}})
+    )
+    wanted = LookupRequest("A", 2020, MediaType.ANIME, use_keywords=True)
+
+    anilist = await AniListProvider(transport("anilist")).fetch_by_id(
+        ExternalId("anilist", "1"), wanted
+    )
+    tmdb = await TmdbProvider(transport("tmdb"), api_key="k").fetch_by_id(
+        ExternalId("tmdb", "7"), wanted
+    )
+
+    assert anilist.genres == ["Action"], "its own genres, not its sub-threshold tags"
+    assert tmdb.genres == ["Animation"]

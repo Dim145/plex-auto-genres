@@ -221,10 +221,10 @@ class LibraryRun(BaseModel):
         default=False,
         alias="useKeywords",
         description=(
-            "Take TMDB's keywords instead of its genres. Much noisier, and it "
-            "needs TMDB among this library's providers -- including an anime "
-            "library that falls back to it, where only the titles TMDB itself "
-            "answers are affected."
+            "Prefer the finer vocabulary a source has -- TMDB's keywords, "
+            "AniList's community tags -- over its genres. Much noisier. A "
+            "source with none for a title falls back to its own genres, so no "
+            "title is left untagged. Needs a source that has keywords at all."
         ),
     )
     clear_genres: bool = Field(

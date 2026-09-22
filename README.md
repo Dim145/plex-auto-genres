@@ -296,9 +296,12 @@ Merging is worth a cap: three sources can hand back thirty names for one title. 
 manually bound title is only asked of the sources that can read the id you pinned,
 so a merge cannot quietly bring back the match the binding was overriding.
 
-`useKeywords` swaps genres for the finer vocabulary of whichever sources have one:
-TMDB's keywords, AniList's community tags. MyAnimeList has none, since its themes and
-demographics are already part of the genres it returns.
+`useKeywords` prefers the finer vocabulary of whichever sources have one: TMDB's
+keywords, AniList's community tags. MyAnimeList has none, since its themes and
+demographics are already part of the genres it returns. Plenty of titles carry no
+keyword at all, so a source with none for a title falls back to its own genres rather
+than leaving it untagged — turn the setting on and a merged library still writes
+something for every title.
 
 ### When two sources spell one genre differently
 

@@ -231,7 +231,8 @@ async def test_all_genres_filtered_out_counts_as_a_failure(store: Store):
     config = make_config()
     report = await Pipeline(config, store, server).tag_library(config.libraries[0])
     assert report.failed == 1
-    assert "no usable genres" in report.failures[0][1]
+    # The source answered: say the rules dropped its names, not that it had none.
+    assert "your ignore and replace rules dropped every one" in report.failures[0][1]
 
 
 @respx.mock
@@ -861,11 +862,11 @@ async def test_a_pin_no_source_can_read_says_so(store: Store):
 
 @respx.mock
 async def test_a_source_with_nothing_to_say_does_not_stop_the_chain(store: Store):
-    """AniList answers with tags alone under useKeywords; a title with none
-    used to end the chain and fail for "no usable genres"."""
+    """A result carrying no names must not end the chain before the sources
+    below it are asked."""
     respx.post("https://graphql.anilist.co").mock(
         return_value=httpx.Response(200, json={"data": {"Media": {
-            "id": 1, "idMal": 1, "title": {"romaji": "Anime"}, "genres": ["Action"],
+            "id": 1, "idMal": 1, "title": {"romaji": "Anime"}, "genres": [],
             "tags": [{"name": "Faint", "rank": 10, "isGeneralSpoiler": False}],
             "averageScore": 80, "startDate": {"year": 1998},
             "siteUrl": "https://anilist.co/anime/1",

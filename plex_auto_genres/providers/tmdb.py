@@ -173,14 +173,19 @@ class TmdbProvider(Provider):
         segment = self._segment(request.media_type)
         title = payload.get("title") or payload.get("name") or request.title
 
+        genres = split_compound_genres(
+            [g["name"] for g in (payload.get("genres") or []) if g.get("name")]
+        )
         if request.use_keywords:
             block = payload.get("keywords") or {}
             # /movie/{id} nests the list under "keywords"; /tv/{id} under "results".
             raw = block.get("keywords") if request.media_type.is_movie else block.get("results")
-            names = [k["name"] for k in (raw or []) if k.get("name")]
+            # Plenty of titles carry none. Handing back nothing would tag them
+            # with nothing and record a failure, so the genres stand in: the
+            # setting asks for the finer vocabulary where there is one.
+            names = [k["name"] for k in (raw or []) if k.get("name")] or genres
         else:
-            names = [g["name"] for g in (payload.get("genres") or []) if g.get("name")]
-            names = split_compound_genres(names)
+            names = genres
 
         return ProviderResult(
             provider=self.name,

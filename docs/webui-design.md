@@ -666,6 +666,26 @@ less. A source now declares the window its header counts over, `limit_window`, a
 transport reads the header only for a source that has said what it means. AniList
 declares sixty seconds; the other two declare nothing and are left alone.
 
+### Keywords, when the title has some — done
+
+Reported from a merging anime library reading AniList and TMDB with `useKeywords` on:
+it looked as though only one source was being used, because almost every failure named
+TMDB alone. The merge was working — a failure naming both sources proves both were
+asked — but the *outcome* was one-sided, and for a reason worth fixing rather than
+explaining.
+
+`useKeywords` was read as an ultimatum: keywords instead of genres, and nothing if the
+source has no keyword for this title. AniList only counts tags at or above the
+agreement threshold, and a great many TMDB entries carry no keyword at all, so each
+source went quiet on a large share of titles. Where both did, the item was tagged with
+nothing and recorded as a failure under backoff. The setting now reads as a preference:
+the finer vocabulary where a source has one, that source's own genres where it does not.
+
+The message shown on the remaining failures was misleading too. "returned no usable
+genres (all filtered by your ignore rules?)" sent people to look at rules that were
+often innocent; when the rules really are the cause it now says so as a fact, with how
+many names they dropped.
+
 ### Next
 
 Decide where secrets should live if they are ever to be edited from the UI — the

@@ -145,9 +145,12 @@ class AniListProvider(Provider):
             and (tag.get("rank") or 0) >= TAG_RANK_THRESHOLD
         ]
         # AniList's genre list is a dozen broad buckets, and for a whole
-        # library it says little. useKeywords takes the tags on their own;
-        # otherwise they are added to the genres, as before.
-        genres = tags if request.use_keywords else [*(media.get("genres") or []), *tags]
+        # library it says little. useKeywords takes the tags on their own --
+        # falling back to those buckets for a title whose tags are all below
+        # the threshold, since tagging it with nothing serves nobody.
+        # Otherwise the tags are added to the genres, as before.
+        own = list(media.get("genres") or [])
+        genres = (tags or own) if request.use_keywords else [*own, *tags]
 
         return ProviderResult(
             provider=self.name,

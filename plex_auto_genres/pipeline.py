@@ -306,9 +306,13 @@ class Pipeline:
                         result = await self._resolve(item, run, pool, mapper, bindings)
                     genres = rules.apply(result.genres)
                     if not genres:
+                        # It answered, so the names are gone by our own doing.
+                        # Blaming the source for "no usable genres" sent people
+                        # looking in the wrong place.
                         raise ProviderNotFound(
-                            f"{result.provider} returned no usable genres "
-                            f"(all filtered by your ignore rules?)"
+                            f"{result.provider} returned "
+                            f"{len(result.genres)} name(s), and your ignore and "
+                            f"replace rules dropped every one of them"
                         )
 
                     async with write_sem:
