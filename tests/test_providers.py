@@ -630,7 +630,7 @@ async def test_the_anilist_tag_threshold_is_the_users_to_set():
     respx.post("https://graphql.anilist.co").mock(
         return_value=httpx.Response(200, json={"data": {"Media": {
             "id": 1, "idMal": 1, "title": {"romaji": "A"}, "genres": [],
-            "tags": [{"name": "Female Harem", "rank": 20, "isGeneralSpoiler": False},
+            "tags": [{"name": "Time Loop", "rank": 20, "isGeneralSpoiler": False},
                      {"name": "Space", "rank": 85, "isGeneralSpoiler": False}],
             "averageScore": 80, "startDate": {"year": 2020},
             "siteUrl": "https://anilist.co/anime/1"}}})
@@ -644,7 +644,7 @@ async def test_the_anilist_tag_threshold_is_the_users_to_set():
     )
 
     assert strict.genres == ["Space"]
-    assert generous.genres == ["Female Harem", "Space"]
+    assert generous.genres == ["Time Loop", "Space"]
 
 
 def test_the_tag_threshold_travels_from_the_settings():

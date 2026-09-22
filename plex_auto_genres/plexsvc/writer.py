@@ -84,8 +84,8 @@ def plan_tags(
                 known.add(fold(tag))
                 desired.append(tag)
     # De-duplicate the same way the genre rules do, on letters and digits
-    # alone: comparing case only would append "Boys Love" beside the
-    # "Boys' Love" a previous run wrote, which is two collections in Plex.
+    # alone: comparing case only would append "Rock n Roll" beside the
+    # "Rock 'n' Roll" a previous run wrote, which is two collections in Plex.
     out: list[str] = []
     seen: set[str] = set()
     for tag in desired:

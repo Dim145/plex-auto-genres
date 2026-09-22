@@ -6,16 +6,16 @@
         "//": "Genre rules per library TYPE. A library can override any of these under its own 'overrides' key.",
 
         "anime": {
-            "ignore": ["Kids", "Erotica"],
+            "ignore": ["Kids"],
             "replace": {
-                "//": "Keys are matched case-insensitively. MAL renamed several genres: Shoujo Ai -> Girls Love, Shounen Ai -> Boys Love, Cars -> Racing, Thriller -> Suspense.",
-                "girls love": "Shoujo",
-                "boys love": "Shounen"
+                "//": "Keys match on letters and digits alone, so case, accents and punctuation need not line up. MAL renamed several genres over the years: Cars -> Racing, Thriller -> Suspense. 'doctor' names the ones your config still spells the old way.",
+                "racing": "Motorsport",
+                "suspense": "Thriller"
             },
             "sortedPrefix": "*",
             "sortedCollections": [
-                "action", "adventure", "comedy", "drama", "ecchi", "fantasy",
-                "harem", "historical", "horror", "isekai", "martial arts",
+                "action", "adventure", "comedy", "drama", "fantasy",
+                "historical", "horror", "isekai", "martial arts",
                 "mecha", "military", "music", "mystery", "psychological",
                 "racing", "romance", "samurai", "school", "sci-fi", "seinen",
                 "shoujo", "shounen", "slice of life", "space", "sports",

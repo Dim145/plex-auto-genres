@@ -38,8 +38,8 @@ class TagField(str, Enum):
 def fold(name: str) -> str:
     """A comparison key for a genre or tag: what two spellings share.
 
-    Case, accents, punctuation and spacing all go, so "Boys Love" and
-    "Boys' Love" stop becoming two collections in Plex, and a rename rule
+    Case, accents, punctuation and spacing all go, so "Rock 'n' Roll" and
+    "Rock n Roll" stop becoming two collections in Plex, and a rename rule
     written as "sci-fi" matches "Sci Fi" as well. Two words that genuinely
     differ -- "Comedy" and "Comedie" -- still need a rename rule to meet.
 

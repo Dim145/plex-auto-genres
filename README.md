@@ -310,8 +310,8 @@ AniList knows, and accept the noise that comes with it.
 
 ### When two sources spell one genre differently
 
-Genres are compared on letters and digits alone, so `Boys Love`, `Boys' Love` and
-`boys-love` are one collection, not three, and the first spelling a source returned is
+Genres are compared on letters and digits alone, so `Rock 'n' Roll`, `Rock n Roll` and
+`rock-n-roll` are one collection, not three, and the first spelling a source returned is
 the one written. Different *words* still need a rule — which is what `replace` is for,
 and it is the answer to mixing a localized source with English-only ones:
 
@@ -383,7 +383,7 @@ What that means, step by step:
 
 `plex-auto-genres doctor` on a v1 file says so before anything is touched, and after the
 upgrade flags config entries that no longer match anything, including MAL genres that
-were renamed (`Cars` → `Racing`, `Shoujo Ai` → `Girls Love`, `Thriller` → `Suspense`, …).
+were renamed (`Cars` → `Racing`, `Thriller` → `Suspense`, `Police` → `Organized Crime`, …).
 
 **Rolling back** is renaming: `config.json.v1` back to `config.json` and the
 `*.imported` files back to their names; the database can stay. From the command line,

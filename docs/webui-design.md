@@ -607,7 +607,7 @@ Three requests from a library in use, all of them about what ends up written:
   read the pinned id, because the others would search by title and merge back the very
   match the binding exists to override.
 - **Names are compared folded.** Two sources spell one idea differently and Plex grows
-  two collections: "Boys Love" beside "Boys' Love". Every comparison in `GenreRules`
+  two collections: "Rock n Roll" beside "Rock 'n' Roll". Every comparison in `GenreRules`
   now runs through `fold()` — case, accents, punctuation and spacing removed — so
   variants collapse and a rename rule reaches every spelling of its key. Genuinely
   different words across languages still need a `replace` line, which is now the one

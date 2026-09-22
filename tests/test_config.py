@@ -14,7 +14,7 @@ V1 = {
     "general_settings": {"genres": {
         "standard-tv": {"ignore": [], "replace": {"sci-fi": "science fiction"},
                         "sortedPrefix": "", "sortedCollections": ["action", "sci-fi"]},
-        "anime": {"ignore": ["kids"], "replace": {"Shoujo Ai": "shoujo"},
+        "anime": {"ignore": ["kids"], "replace": {"Cars": "Racing"},
                   "sortedPrefix": "*", "sortedCollections": ["action"]},
     }},
     "automation_settings": {"run": [
@@ -65,8 +65,8 @@ def test_replace_keys_are_lowercased():
     """v1 raised a bare KeyError when a replace key was not already lowercase."""
     config = build(V1)
     rules = config.defaults[MediaType.ANIME]
-    assert "shoujo ai" in rules.replace
-    assert rules.apply(["Shoujo Ai"]) == ["shoujo"]
+    assert "cars" in rules.replace, "the key was written 'Cars' in the file"
+    assert rules.apply(["Cars"]) == ["Racing"]
 
 
 def test_per_library_overrides_layer_over_type_defaults():
@@ -264,12 +264,12 @@ def test_spelling_variants_collapse_into_one_genre():
     Comparisons run on letters and digits alone, so punctuation, spacing, case
     and accents stop splitting a genre in two.
     """
-    rules = GenreRules(ignore=["ecchi"], replace={"comédie": "Comedy"})
+    rules = GenreRules(ignore=["talk show"], replace={"comédie": "Comedy"})
 
-    assert rules.apply(["Boys Love", "Boys' Love", "boys-love"]) == ["Boys Love"]
+    assert rules.apply(["Rock 'n' Roll", "Rock n Roll", "rock-n-roll"]) == ["Rock 'n' Roll"]
     assert rules.apply(["Comédie", "Comedy", "COMEDIE"]) == ["Comedy"]
     assert rules.apply(["Sci-Fi", "Sci Fi"]) == ["Sci-Fi"], "first spelling seen wins"
-    assert rules.apply(["Ecchi", "ecchi!"]) == [], "an ignore rule matches variants too"
+    assert rules.apply(["Talk Show", "talk-show"]) == [], "an ignore rule matches variants too"
 
 
 def test_a_rename_reaches_a_genre_whatever_its_spelling():

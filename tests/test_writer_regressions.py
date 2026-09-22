@@ -190,11 +190,12 @@ def test_undo_clears_a_rating_that_did_not_exist(store: Store, item):
 
 def test_a_tag_already_in_plex_is_matched_on_letters_not_punctuation():
     """The rules fold names, so the writer has to as well. Comparing case
-    only appended "Boys Love" beside the "Boys' Love" an earlier run wrote,
-    which is exactly the two collections the folding exists to prevent."""
-    kept = plan_tags(current=["Boys' Love", "Action"], incoming=["Boys Love", "Drama"],
-                     clear=False, prefix="")
-    assert kept == ["Boys' Love", "Action", "Drama"]
+    only appended "Rock n Roll" beside the "Rock 'n' Roll" an earlier run
+    wrote, which is exactly the two collections the folding exists to
+    prevent."""
+    kept = plan_tags(current=["Rock 'n' Roll", "Action"],
+                     incoming=["Rock n Roll", "Drama"], clear=False, prefix="")
+    assert kept == ["Rock 'n' Roll", "Action", "Drama"]
 
 
 def test_folding_does_not_merge_names_that_only_look_alike():

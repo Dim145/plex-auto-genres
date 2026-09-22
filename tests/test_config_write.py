@@ -67,11 +67,11 @@ def test_editable_document_round_trips_through_validation():
 
 def test_comments_survive_a_rewrite_at_their_position():
     old = {"//": "top note", "version": 2, "defaults": {"//anime": "why", "anime": {"ignore": ["Kids"]}}}
-    new = {"version": 2, "defaults": {"anime": {"ignore": ["Kids", "Erotica"]}}, "libraries": []}
+    new = {"version": 2, "defaults": {"anime": {"ignore": ["Kids", "Talk"]}}, "libraries": []}
     merged = merge_preserving_comments(old, new)
     assert list(merged) == ["//", "version", "defaults", "libraries"]
     assert merged["defaults"]["//anime"] == "why"
-    assert merged["defaults"]["anime"]["ignore"] == ["Kids", "Erotica"]
+    assert merged["defaults"]["anime"]["ignore"] == ["Kids", "Talk"]
 
 
 def test_library_comments_follow_the_library_not_the_index():
