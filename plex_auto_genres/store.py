@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 import threading
 import time
@@ -25,11 +26,11 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from .models import ExternalId, RunReport
+from .models import ExternalId, ManualTags, RunReport
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 #: Columns added after the first release, applied with ALTER TABLE on open.
 _ADDED_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
@@ -39,6 +40,9 @@ _ADDED_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
     ),
     "snapshots": (
         ("locked_before", "INTEGER"),  # was the field locked before the write?
+    ),
+    "manual_tags": (
+        ("title", "TEXT"),       # the item's name, for lists and the CLI
     ),
 }
 
@@ -78,6 +82,20 @@ CREATE TABLE IF NOT EXISTS bindings (
     -- One pin per source per item: a series that exists on both TMDB and
     -- AniList can name its id on each, which a merged library then uses.
     PRIMARY KEY (library, media_key, provider)
+);
+
+-- Genres (or collections) decided by hand for one item. Everything in it
+-- outranks the sources; deleting the row hands the item back to them.
+CREATE TABLE IF NOT EXISTS manual_tags (
+    library    TEXT NOT NULL,
+    media_key  TEXT NOT NULL,
+    added      TEXT NOT NULL DEFAULT '[]',
+    removed    TEXT NOT NULL DEFAULT '[]',
+    locked     INTEGER NOT NULL DEFAULT 0,
+    note       TEXT,
+    title      TEXT,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (library, media_key)
 );
 
 CREATE TABLE IF NOT EXISTS snapshots (
@@ -176,6 +194,20 @@ def run_status(row: sqlite3.Row, *, live: bool) -> str:
     if report.get("error") or report.get("failed", 0):
         return "partial" if report.get("written", 0) else "failed"
     return "ok"
+
+
+_YEAR_SUFFIX = re.compile(r"\s+\(\d{4}\)$")
+
+
+def _manual_from_row(row: sqlite3.Row) -> ManualTags:
+    return ManualTags(
+        added=tuple(json.loads(row["added"] or "[]")),
+        removed=tuple(json.loads(row["removed"] or "[]")),
+        locked=bool(row["locked"]),
+        note=row["note"],
+        updated_at=row["updated_at"],
+        title=row["title"],
+    )
 
 
 def _retry_after(attempts: int) -> float:
@@ -417,7 +449,9 @@ class Store:
     def rename_media_keys(self, library: str, mapping: dict[str, str]) -> int:
         """Move cache rows from one key to another, e.g. v1's ``"Title (Year)"``
         onto the GUID the pipeline now keys by. A row already present under the
-        new key wins; the stale one is dropped. Returns how many were moved."""
+        new key wins; the stale one is dropped. A decision by hand filed under
+        the old key moves the same way, or the pipeline would never find it.
+        Returns how many cache rows were moved."""
         moved = 0
         with self._tx() as conn:
             for old, new in mapping.items():
@@ -430,16 +464,43 @@ class Store:
                 conn.execute(
                     "DELETE FROM media_state WHERE library = ? AND media_key = ?", (library, old)
                 )
+                conn.execute(
+                    "UPDATE OR IGNORE manual_tags SET media_key = ? "
+                    "WHERE library = ? AND media_key = ?",
+                    (new, library, old),
+                )
+                conn.execute(
+                    "DELETE FROM manual_tags WHERE library = ? AND media_key = ?", (library, old)
+                )
         return moved
 
-    def providers_for_library(self, library: str) -> dict[str, tuple[str | None, str | None]]:
-        """``media_key -> (provider, provider_id)`` for every cached entry."""
+    def find_keys(self, library: str, text: str) -> list[tuple[str, str]]:
+        """The items a typed name may mean, as ``(media_key, title)``.
+
+        A match is the key itself, or an item cached or overridden under that
+        title, with or without its year, ignoring case. The CLI has no Plex
+        listing to search, and most items are keyed by a GUID nobody types.
+        """
+        wanted = text.strip().casefold()
+        if not wanted:
+            # A blank name would match every override saved without one.
+            return []
         with self._read() as conn:
             rows = conn.execute(
-                "SELECT media_key, provider, provider_id FROM media_state WHERE library = ?",
-                (library,),
+                "SELECT media_key, title, year FROM media_state WHERE library = ? "
+                "UNION ALL "
+                "SELECT media_key, COALESCE(title, ''), NULL FROM manual_tags WHERE library = ?",
+                (library, library),
             ).fetchall()
-        return {row["media_key"]: (row["provider"], row["provider_id"]) for row in rows}
+        found: dict[str, str] = {}
+        for row in rows:
+            title = row["title"] or ""
+            named = f"{title} ({row['year']})" if row["year"] else title
+            # An override stores the name as shown, year included.
+            bare = _YEAR_SUFFIX.sub("", title)
+            if wanted in {n.casefold() for n in (row["media_key"], title, named, bare)}:
+                found.setdefault(row["media_key"], named or row["media_key"])
+        return list(found.items())
 
     def forget(self, library: str, media_key: str) -> bool:
         """Drop one item's cache entry so the next run looks at it again."""
@@ -448,11 +509,6 @@ class Store:
                 "DELETE FROM media_state WHERE library = ? AND media_key = ?", (library, media_key)
             )
         return cur.rowcount > 0
-
-    def clear_library(self, library: str) -> int:
-        with self._tx() as conn:
-            cur = conn.execute("DELETE FROM media_state WHERE library = ?", (library,))
-        return cur.rowcount
 
     def clear_failures(self, library: str) -> int:
         """Drop the failed entries so the next run retries them straight away.
@@ -579,6 +635,77 @@ class Store:
             return conn.execute(
                 "SELECT * FROM bindings ORDER BY library, media_key, created_at, provider"
             ).fetchall()
+
+    # -- manual tags --------------------------------------------------------
+
+    def set_manual(
+        self,
+        library: str,
+        media_key: str,
+        *,
+        added: list[str],
+        removed: list[str],
+        locked: bool,
+        note: str | None = None,
+        title: str | None = None,
+    ) -> ManualTags:
+        """Record what a person decided about an item's tags.
+
+        The cached result stays: the decision is part of each item's
+        fingerprint (:meth:`ManualTags.stamp`), so a result made under another
+        decision is stale on its own, while a note-only edit re-queries
+        nothing and the score the ratings pass reads survives. A missing
+        ``title`` keeps the one already stored.
+        """
+        now = time.time()
+        with self._tx() as conn:
+            conn.execute(
+                "INSERT INTO manual_tags "
+                "(library, media_key, added, removed, locked, note, title, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(library, media_key) DO UPDATE SET "
+                "added=excluded.added, removed=excluded.removed, locked=excluded.locked, "
+                "note=excluded.note, title=COALESCE(excluded.title, manual_tags.title), "
+                "updated_at=excluded.updated_at",
+                (library, media_key, json.dumps(added), json.dumps(removed),
+                 int(locked), note, title, now),
+            )
+            # Read back rather than RETURNING, which SQLite only has since 3.35.
+            row = conn.execute(
+                "SELECT * FROM manual_tags WHERE library = ? AND media_key = ?",
+                (library, media_key),
+            ).fetchone()
+        return _manual_from_row(row)
+
+    def delete_manual(self, library: str, media_key: str) -> bool:
+        """Hand an item back to the sources. Returns whether it had an override.
+
+        Its cached result was stamped with the decision, so the next run sees
+        it as stale and asks the sources again.
+        """
+        with self._tx() as conn:
+            cur = conn.execute(
+                "DELETE FROM manual_tags WHERE library = ? AND media_key = ?",
+                (library, media_key),
+            )
+        return cur.rowcount > 0
+
+    def manual_for_library(self, library: str) -> dict[str, ManualTags]:
+        """``media_key -> ManualTags`` for a whole library. One query."""
+        return {key: tags for _, key, tags in self.list_manual(library)}
+
+    def list_manual(self, library: str | None = None) -> list[tuple[str, str, ManualTags]]:
+        """Every manual override as ``(library, media_key, tags)``. One query."""
+        with self._read() as conn:
+            if library:
+                rows = conn.execute(
+                    "SELECT * FROM manual_tags WHERE library = ? ORDER BY media_key", (library,)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM manual_tags ORDER BY library, media_key"
+                ).fetchall()
+        return [(r["library"], r["media_key"], _manual_from_row(r)) for r in rows]
 
     # -- runs and undo ----------------------------------------------------
 

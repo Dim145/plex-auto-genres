@@ -1,11 +1,13 @@
-import { ArrowLeft, Link2, Pin, RefreshCw, RotateCcw, Search, Unlink } from "lucide-react";
-import { useEffect, useState } from "react";
+import { ArrowLeft, Hand, Link2, Lock, Pin, RefreshCw, RotateCcw, Search, Tags, Unlink } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api, useConfig, useDeleteBinding, useForgetItem, useLibraryItems, useRefreshLibrary } from "../api/client";
 import type { ItemStatusFilter, ItemView } from "../api/types";
 import { BindingPicker } from "../components/BindingPicker";
 import { useConfirm } from "../components/ConfirmDialog";
 import { Empty, ErrorBlock } from "../components/Empty";
+import { ManualSummary } from "../components/ManualSummary";
+import { ManualTagsEditor } from "../components/ManualTagsEditor";
 import { Pager } from "../components/Pager";
 import { PageHeader, Panel } from "../components/Panel";
 import { Skeleton } from "../components/Skeleton";
@@ -20,6 +22,7 @@ const FILTERS: { key: ItemStatusFilter; label: string }[] = [
   { key: "failed", label: "Failed" },
   { key: "unprocessed", label: "Not yet run" },
   { key: "bound", label: "Bound" },
+  { key: "manual", label: "By hand" },
 ];
 
 const PAGE_SIZE = 50;
@@ -65,6 +68,18 @@ export default function LibraryBrowser() {
   const confirm = useConfirm();
   const toast = useToast();
   const [picking, setPicking] = useState<ItemView | null>(null);
+  const [editing, setEditing] = useState<ItemView | null>(null);
+  const field = run?.useGenres === false ? "collections" : "genres";
+
+  // Suggestions for the by-hand editor: the names on this page, most used first.
+  const vocabulary = useMemo(() => {
+    const seen = new Map<string, number>();
+    for (const item of items.data?.items ?? []) {
+      const names = field === "genres" ? item.current_genres : item.current_collections;
+      for (const name of [...names, ...(item.state?.genres ?? [])]) seen.set(name, (seen.get(name) ?? 0) + 1);
+    }
+    return [...seen.entries()].sort((a, b) => b[1] - a[1]).map(([name]) => name);
+  }, [items.data, field]);
 
   const setFilter = (key: ItemStatusFilter) => {
     const next = new URLSearchParams(params);
@@ -166,7 +181,7 @@ export default function LibraryBrowser() {
           <>
             <ul className="items">
               {items.data.items.map((item) => (
-                <ItemRow key={item.rating_key} item={item} onBind={() => setPicking(item)} onUnbind={() => void onUnbind(item)} onForget={() => void onForget(item)} busy={forget.isPending || unbind.isPending} />
+                <ItemRow key={item.rating_key} item={item} noun={field} onEdit={() => setEditing(item)} onBind={() => setPicking(item)} onUnbind={() => void onUnbind(item)} onForget={() => void onForget(item)} busy={forget.isPending || unbind.isPending} />
               ))}
             </ul>
             <Pager page={items.data.page} size={items.data.size} total={items.data.total} onPage={setPage} />
@@ -177,16 +192,37 @@ export default function LibraryBrowser() {
       {run && (
         <BindingPicker key={run.type} library={library} type={run.type} item={picking} schemes={items.data?.bind_schemes ?? []} preferredProvider={run.providers?.[0]} onClose={() => setPicking(null)} />
       )}
+      {run && editing && (
+        <ManualTagsEditor
+          key={editing.media_key}
+          library={library}
+          field={field}
+          keepsExisting={!run.useGenres || !run.clearGenres}
+          prefix={config.data?.secrets.collection_prefix ?? ""}
+          item={editing}
+          vocabulary={vocabulary}
+          onClose={() => setEditing(null)}
+        />
+      )}
     </div>
   );
 }
 
-function ItemRow({ item, onBind, onUnbind, onForget, busy }: { item: ItemView; onBind: () => void; onUnbind: () => void; onForget: () => void; busy: boolean }) {
+const MATCH: Record<ItemView["match"], { label: string; icon: typeof Pin }> = {
+  manual: { label: "set by hand", icon: Lock },
+  binding: { label: "bound", icon: Pin },
+  guid: { label: "via GUID", icon: Link2 },
+  search: { label: "by title search", icon: Search },
+};
+
+function ItemRow({ item, noun, onEdit, onBind, onUnbind, onForget, busy }: { item: ItemView; noun: "genres" | "collections"; onEdit: () => void; onBind: () => void; onUnbind: () => void; onForget: () => void; busy: boolean }) {
   const thumb = api.thumbUrl(item.thumb);
   const state = item.state;
   const match = item.match;
-  const matchLabel = match === "binding" ? "bound" : match === "guid" ? "via GUID" : "by title search";
-  const MatchIcon = match === "binding" ? Pin : match === "guid" ? Link2 : Search;
+  const manual = item.manual;
+  const { label: matchLabel, icon: matchIcon } = MATCH[match] ?? MATCH.search;
+  // Decided by hand but not locked: no source had the title, the decision stands alone.
+  const MatchIcon = match === "manual" && !manual?.locked ? Hand : matchIcon;
 
   return (
     <li className="item">
@@ -201,7 +237,7 @@ function ItemRow({ item, onBind, onUnbind, onForget, busy }: { item: ItemView; o
             {match === "binding" && item.bindings.map((b) => (
               <span key={b.provider}> · {b.provider}://{b.provider_id}</span>
             ))}
-            {match !== "binding" && state?.provider && <span> · {state.provider}:{state.provider_id}</span>}
+            {match !== "binding" && match !== "manual" && state?.provider && <span> · {state.provider}:{state.provider_id}</span>}
           </span>
           {state ? (
             <StatusDot tone={state.status === "ok" ? "ok" : "fail"} label={`${state.status} · ${relTime(state.updated_at)}`} />
@@ -216,6 +252,11 @@ function ItemRow({ item, onBind, onUnbind, onForget, busy }: { item: ItemView; o
             {state.genres.length > 6 && <span className="chip chip--quiet">+{state.genres.length - 6}</span>}
           </div>
         )}
+        {manual && (
+          <ManualSummary manual={manual} field={noun}>
+            {manual.applied === false && <span className="faint">· applies on the next run</span>}
+          </ManualSummary>
+        )}
       </div>
       <div className="item__actions">
         {state && (
@@ -223,6 +264,15 @@ function ItemRow({ item, onBind, onUnbind, onForget, busy }: { item: ItemView; o
             <RotateCcw size={15} aria-hidden="true" />
           </button>
         )}
+        <button
+          type="button"
+          className={`button button--ghost button--sm ${manual ? "button--marked" : ""}`}
+          onClick={onEdit}
+          aria-label={`${noun === "genres" ? "Genres" : "Collections"} of ${item.title}${item.year ? ` (${item.year})` : ""}, by hand`}
+          title={manual ? `Edit what was decided by hand` : `Add or refuse ${noun} by hand`}
+        >
+          <Tags size={12} aria-hidden="true" /> {noun === "genres" ? "Genres…" : "Collections…"}
+        </button>
         {item.bindings.length > 0 ? (
           <button type="button" className="button button--ghost button--sm" onClick={onUnbind} disabled={busy}>
             <Unlink size={12} aria-hidden="true" /> Unbind

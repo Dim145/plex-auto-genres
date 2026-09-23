@@ -17,7 +17,7 @@ from ..config import DEFAULT_PROVIDERS, config_json_schema, validate_document, w
 from ..doctor import run_doctor
 from ..errors import ConfigError, PlexConnectionError, ProviderError
 from ..jobs import Job, JobConflict, JobError, JobManager, JobOptions
-from ..models import MediaItem, MediaType
+from ..models import ManualTags, MediaItem, MediaType, check_decision
 from ..pipeline import media_key
 from ..plexsvc.writer import undo_run
 from ..providers import LookupRequest, bindable_schemes, build_providers
@@ -441,11 +441,22 @@ async def job_events(request: Request, job_id: str) -> StreamingResponse:
 # -- library browser ---------------------------------------------------------
 
 
-def _match_source(item: MediaItem, entry, bound: bool, cached: CachedState | None) -> str:
+def _manual_view(manual: ManualTags, applied: bool | None = None) -> schemas.ManualView:
+    return schemas.ManualView(**manual.as_dict(), applied=applied)
+
+
+def _match_source(
+    item: MediaItem, entry, bound: bool, cached: CachedState | None,
+    manual: ManualTags | None = None,
+) -> str:
     """How the item matched: what the last run recorded, else what the next one would do."""
+    if manual is not None and manual.locked:
+        return "manual"
     if bound:
         return "binding"
-    if cached is not None and cached.status == "ok" and cached.source:
+    # A decision handed back leaves its "manual" row behind until the next run.
+    if (cached is not None and cached.status == "ok" and cached.source
+            and (cached.source != "manual" or manual is not None)):
         return cached.source
     schemes = set(bindable_schemes(entry.type, entry.resolved_providers))
     return "guid" if any(g.scheme in schemes for g in item.guids) else "search"
@@ -458,7 +469,7 @@ async def library_items(
     page: int = Query(default=1, ge=1),
     size: int = Query(default=50, ge=1, le=200),
     q: str | None = Query(default=None, max_length=200),
-    status: Literal["all", "ok", "failed", "unprocessed", "bound"] = "all",
+    status: Literal["all", "ok", "failed", "unprocessed", "bound", "manual"] = "all",
     refresh: bool = False,
 ) -> schemas.ItemsPage:
     """A page of a configured library's items, joined with match and cache state."""
@@ -477,6 +488,8 @@ async def library_items(
     bound: dict[str, list[schemas.BindingView]] = {}
     for row in state.store.list_bindings(entry.library):
         bound.setdefault(row["media_key"], []).append(schemas.BindingView(**dict(row)))
+    manuals = state.store.manual_for_library(entry.library)
+    settings_fp = config.fingerprint(entry)
 
     def classify(item: MediaItem) -> tuple[str, str]:
         key = media_key(item)
@@ -484,17 +497,18 @@ async def library_items(
         bucket = "unprocessed" if cached is None else cached.status
         return key, bucket
 
-    counts = {"all": len(items), "ok": 0, "failed": 0, "unprocessed": 0, "bound": 0}
+    counts = {"all": len(items), "ok": 0, "failed": 0, "unprocessed": 0, "bound": 0,
+              "manual": 0}
     rows: list[tuple[MediaItem, str, str]] = []
     needle = q.casefold().strip() if q else ""
     for item in items:
         key, bucket = classify(item)
         counts[bucket] += 1
-        if key in bound:
-            counts["bound"] += 1
+        counts["bound"] += key in bound
+        counts["manual"] += key in manuals
         if needle and needle not in item.title.casefold():
             continue
-        if status == "bound" and key not in bound:
+        if (status == "bound" and key not in bound) or (status == "manual" and key not in manuals):
             continue
         if status in ("ok", "failed", "unprocessed") and bucket != status:
             continue
@@ -505,6 +519,7 @@ async def library_items(
     views: list[schemas.ItemView] = []
     for item, key, _bucket in rows[start:start + size]:
         cached = states.get(key)
+        manual = manuals.get(key)
         views.append(schemas.ItemView(
             rating_key=item.rating_key,
             media_key=key,
@@ -512,8 +527,14 @@ async def library_items(
             year=item.year,
             thumb=item.thumb,
             guids=[str(g) for g in item.guids],
-            match=_match_source(item, entry, key in bound, cached),  # type: ignore[arg-type]
+            match=_match_source(  # type: ignore[arg-type]
+                item, entry, key in bound, cached, manual,
+            ),
             bindings=bound.get(key, []),
+            manual=_manual_view(
+                manual,
+                applied=cached is not None and cached.fingerprint == manual.stamp(settings_fp),
+            ) if manual is not None else None,
             state=schemas.ItemState(
                 status=cached.status,  # type: ignore[arg-type]
                 provider=cached.provider,
@@ -585,6 +606,63 @@ async def search_candidates(
         except ProviderError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
     return [schemas.CandidateView(**c.as_dict()) for c in found]
+
+
+# -- manual tags ---------------------------------------------------------------
+
+
+@router.get("/manual", response_model=list[schemas.ManualEntry])
+async def manual_tags(request: Request, library: str | None = None) -> list[schemas.ManualEntry]:
+    """Every item whose tags were decided by hand, optionally in one library."""
+    state = _state(request)
+    return [
+        schemas.ManualEntry(library=library_name, media_key=key, **manual.as_dict())
+        for library_name, key, manual in state.store.list_manual(_canonical_library(state, library))
+    ]
+
+
+@router.put("/manual", response_model=schemas.ManualView | None)
+async def set_manual_tags(request: Request, body: schemas.ManualIn) -> schemas.ManualView | None:
+    """Decide an item's tags by hand. An override that decides nothing is removed.
+
+    It takes effect on the library's next run, which reprocesses the item: its
+    cached result was made under another decision. That holds for a run
+    already under way, too; the decision is part of the item's fingerprint.
+    """
+    state = _state(request)
+    config = _config_or_503(state)
+    entry = config.find(body.library)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"Library {body.library!r} is not configured.")
+    try:
+        check_decision(body.added, body.removed, config.plex.collection_prefix)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not (body.added or body.removed or body.locked):
+        state.store.delete_manual(entry.library, body.media_key)
+        return None
+    saved = state.store.set_manual(
+        entry.library, body.media_key,
+        added=body.added, removed=body.removed, locked=body.locked,
+        note=body.note, title=body.title,
+    )
+    return _manual_view(saved)
+
+
+@router.delete("/manual", status_code=200)
+async def delete_manual_tags(
+    request: Request, library: str, media_key_: str = Query(alias="media_key")
+) -> dict:
+    """Hand an item's tags back to the sources, from the next run on.
+
+    Where the library merges rather than replaces, names the decision added
+    stay on the item; refusing them first is what takes them off.
+    """
+    state = _state(request)
+    canonical = _canonical_library(state, library) or library
+    if not state.store.delete_manual(canonical, media_key_):
+        raise HTTPException(status_code=404, detail="No manual tags on that item.")
+    return {"removed": True}
 
 
 # -- bindings CRUD -------------------------------------------------------------

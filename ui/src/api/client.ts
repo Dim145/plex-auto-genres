@@ -17,6 +17,9 @@ import type {
   JobStatus,
   JobView,
   LibraryView,
+  ManualEntry,
+  ManualIn,
+  ManualView,
   MediaType,
   Problem,
   RunOptions,
@@ -35,13 +38,28 @@ export class ApiError extends Error {
   readonly body: unknown;
 
   constructor(problem: Problem, body: unknown = problem) {
-    super(problem.detail ?? problem.title);
+    const detail = readableDetail(problem.detail);
+    super(detail ?? problem.title);
     this.name = "ApiError";
     this.status = problem.status;
     this.title = problem.title;
-    this.detail = problem.detail ?? null;
+    this.detail = detail;
     this.body = body;
   }
+}
+
+/**
+ * FastAPI's own 422 puts a list of `{loc, msg}` in `detail`; used as a message
+ * as it is, that read "[object Object]". The structure stays in `body`.
+ */
+function readableDetail(detail: unknown): string | null {
+  if (typeof detail === "string") return detail;
+  if (!Array.isArray(detail)) return null;
+  const messages = detail
+    .map((d) => (d && typeof d === "object" && "msg" in d ? String((d as { msg: unknown }).msg) : ""))
+    .map((m) => m.replace(/^Value error, /, ""))
+    .filter(Boolean);
+  return messages.length ? messages.join("; ") : null;
 }
 
 /** Fired when any API call comes back 401, so the shell can show the login screen. */
@@ -128,6 +146,11 @@ export const api = {
   /** Without `provider`, every id pinned on the item goes. */
   deleteBinding: (library: string, mediaKey: string, provider?: string) =>
     send<{ removed: boolean }>("DELETE", `/api/v1/bindings?library=${encodeURIComponent(library)}&media_key=${encodeURIComponent(mediaKey)}${provider ? `&provider=${encodeURIComponent(provider)}` : ""}`, undefined),
+  manual: (library?: string) => get<ManualEntry[]>("/api/v1/manual", { library }),
+  /** An override that decides nothing is removed, and the answer is then null. */
+  setManual: (body: ManualIn) => send<ManualView | null>("PUT", "/api/v1/manual", body),
+  deleteManual: (library: string, mediaKey: string) =>
+    send<{ removed: boolean }>("DELETE", `/api/v1/manual?library=${encodeURIComponent(library)}&media_key=${encodeURIComponent(mediaKey)}`, undefined),
   thumbUrl: (path: string | null) => (path ? `/api/v1/plex/thumb?path=${encodeURIComponent(path)}` : null),
   validateConfig: (doc: ConfigDocument) => send<ValidationResult>("POST", "/api/v1/config/validate", doc),
   saveConfig: (doc: ConfigDocument, etag: string | null) =>
@@ -174,6 +197,9 @@ export const useRun = (id: string) =>
 
 export const useBindings = (library?: string) =>
   useQuery({ queryKey: ["bindings", library ?? ""], queryFn: () => api.bindings(library) });
+
+export const useManualTags = (library?: string) =>
+  useQuery({ queryKey: ["manual", library ?? ""], queryFn: () => api.manual(library) });
 
 // -- jobs ------------------------------------------------------------------
 
@@ -406,6 +432,7 @@ function useInvalidateItems() {
   return () => {
     void qc.invalidateQueries({ queryKey: ["items"] });
     void qc.invalidateQueries({ queryKey: ["bindings"] });
+    void qc.invalidateQueries({ queryKey: ["manual"] });
     void qc.invalidateQueries({ queryKey: ["libraries"] });
   };
 }
@@ -421,6 +448,45 @@ export function useDeleteBinding() {
     mutationFn: ({ library, mediaKey, provider }: { library: string; mediaKey: string; provider?: string }) =>
       api.deleteBinding(library, mediaKey, provider),
     onSuccess: invalidate,
+  });
+}
+
+/**
+ * Put a saved decision on the cached item rows at once. The refetch that
+ * follows can take seconds when the server re-reads Plex, and a dialog opened
+ * again in the meantime started from the old decision and saved over the new.
+ */
+function usePatchItemRows() {
+  const qc = useQueryClient();
+  return (library: string, mediaKey: string, manual: ManualView | null) =>
+    qc.setQueriesData<ItemsPage>({ queryKey: ["items"] }, (page) =>
+      page && page.library === library
+        ? { ...page, items: page.items.map((i) => (i.media_key === mediaKey ? { ...i, manual } : i)) }
+        : page,
+    );
+}
+
+export function useSetManual() {
+  const invalidate = useInvalidateItems();
+  const patch = usePatchItemRows();
+  return useMutation({
+    mutationFn: (body: ManualIn) => api.setManual(body),
+    onSuccess: (saved, body) => {
+      patch(body.library, body.media_key, saved && { ...saved, applied: false });
+      invalidate();
+    },
+  });
+}
+
+export function useDeleteManual() {
+  const invalidate = useInvalidateItems();
+  const patch = usePatchItemRows();
+  return useMutation({
+    mutationFn: ({ library, mediaKey }: { library: string; mediaKey: string }) => api.deleteManual(library, mediaKey),
+    onSuccess: (_removed, { library, mediaKey }) => {
+      patch(library, mediaKey, null);
+      invalidate();
+    },
   });
 }
 

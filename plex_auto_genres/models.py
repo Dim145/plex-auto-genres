@@ -7,8 +7,11 @@ loops. The pydantic models live in :mod:`plex_auto_genres.config`.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import unicodedata
-from dataclasses import dataclass, field
+from collections.abc import Iterable
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 
 
@@ -121,6 +124,113 @@ class MediaItem:
         return self.current_collections
 
 
+@dataclass(frozen=True, slots=True)
+class ManualTags:
+    """What a person decided about one item's genres (or collections).
+
+    Three instructions, in the vocabulary Kometa uses for the same job:
+
+    * ``added`` -- always written, whatever the sources say, and even when
+      they have nothing for the title;
+    * ``removed`` -- never written, and taken off the item if it is there;
+    * ``locked`` -- the sources are no longer asked about this item. For
+      genres the list is then exactly ``added``; collections are never
+      cleared, since they also hold the ones people make, so a locked
+      collection item gets ``added`` and loses ``removed`` and nothing else.
+
+    Names are kept as the person gave them, collection prefix included when
+    they picked one from Plex: the writer works out the spelling to write.
+    Deleting the override hands the item back to the sources.
+    """
+
+    added: tuple[str, ...] = ()
+    removed: tuple[str, ...] = ()
+    locked: bool = False
+    note: str | None = None
+    updated_at: float = 0.0
+    #: The item's name when this was decided: a list of overrides can then
+    #: say more than ``tmdb://1234``, and the CLI can find it again by name.
+    title: str | None = None
+
+    @property
+    def decides(self) -> bool:
+        """Whether this says anything at all; an empty one is no override."""
+        return bool(self.added or self.removed or self.locked)
+
+    def stamp(self, fingerprint: str) -> str:
+        """The cache fingerprint of an item carrying this decision.
+
+        The decision is part of what produced a cached result, so a run that
+        applied an older one -- or none -- must not count as done. Folding it
+        into the fingerprint, rather than deleting the cached row on every
+        save, is what keeps a decision saved while a run is under way from
+        being lost when that run records the item a moment later. The note
+        and the title are left out: editing them changes nothing written.
+        """
+        if not self.decides:
+            return fingerprint
+        payload = json.dumps([self.added, self.removed, self.locked], ensure_ascii=False)
+        return f"{fingerprint}+{hashlib.sha256(payload.encode()).hexdigest()[:12]}"
+
+    def as_dict(self) -> dict:
+        """Plain JSON types, for the API and ``manuals --json``."""
+        out = asdict(self)
+        out["added"], out["removed"] = list(self.added), list(self.removed)
+        return out
+
+
+#: The longest tag name a decision accepts.
+MAX_NAME_LENGTH = 120
+
+
+def unique_names(names: Iterable[str]) -> list[str]:
+    """First spelling of each folded name, in order; blanks dropped."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for name in names:
+        key = fold(name)
+        if key and key not in seen:
+            seen.add(key)
+            out.append(name)
+    return out
+
+
+def clean_names(names: Iterable[str]) -> list[str]:
+    """Names typed by a person, ready to store: stripped, deduplicated.
+
+    Refuses rather than drops a name the rest of the app would lose: one
+    with no letter or digit folds to nothing, and the genre rules discard
+    those, so a lock made of one would quietly become an empty lock.
+    """
+    cleaned = [n.strip() for n in names if n and n.strip()]
+    for name in cleaned:
+        if len(name) > MAX_NAME_LENGTH:
+            raise ValueError(f"{name[:40]!r}... is longer than {MAX_NAME_LENGTH} characters")
+        if not fold(name):
+            raise ValueError(f"{name!r} has no letter or digit to match a tag by")
+    return unique_names(cleaned)
+
+
+def bare_name(name: str, prefix: str) -> str:
+    """``name`` without the collection prefix the app writes, if it has it."""
+    if prefix and name.startswith(prefix) and name != prefix:
+        return name[len(prefix):]
+    return name
+
+
+def check_decision(added: Iterable[str], removed: Iterable[str], prefix: str = "") -> None:
+    """Refuse a name that is both always and never written.
+
+    Compared the way the writer matches tags, prefix or not: "PAG-Action"
+    added and "Action" refused name one tag, and one of them would have to
+    lose without a word.
+    """
+    refused = {fold(bare_name(n, prefix)) for n in removed}
+    clash = next((n for n in added if fold(bare_name(n, prefix)) in refused), None)
+    if clash is not None:
+        raise ValueError(f"{clash!r} is both added and removed; keep one")
+
+
 @dataclass(slots=True)
 class ProviderResult:
     """Normalised metadata returned by any provider."""
@@ -177,6 +287,8 @@ class ItemOutcome:
     provider_id: str | None = None
     error: str | None = None
     retryable: bool = True
+    #: Written from a decision alone, with no source answering for it.
+    by_hand: bool = False
 
 
 @dataclass(slots=True)

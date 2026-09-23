@@ -202,3 +202,31 @@ def test_folding_does_not_merge_names_that_only_look_alike():
     assert plan_tags(current=["Action"], incoming=["Adventure"], clear=False, prefix="") == [
         "Action", "Adventure"
     ]
+
+
+def test_a_manual_removal_takes_off_a_tag_plex_already_has():
+    """Merging keeps what Plex holds, so a removal has to reach into it too:
+    otherwise it could only ever stop a tag being added, never take one off."""
+    kept = plan_tags(current=["Action", "Kids", "Drama"], incoming=["Comedy"],
+                     clear=False, prefix="", remove=["kids"])
+    assert kept == ["Action", "Drama", "Comedy"]
+
+
+def test_a_manual_removal_matches_a_prefixed_collection():
+    kept = plan_tags(current=["_Action", "_Kids"], incoming=["Drama"],
+                     clear=False, prefix="_", remove=["Kids"])
+    assert kept == ["_Action", "_Drama"]
+
+
+def test_decisions_match_a_tag_with_the_prefix_or_without_it():
+    """A person may name a tag the app wrote ("PAG-Action", or just "Action")
+    or one it did not (Plex's "Kids", their "My Favourites"): both must hit."""
+    kept = plan_tags(current=["Kids", "PAG-Action", "My Favourites"], incoming=["Drama"],
+                     clear=False, prefix="PAG-", remove=["Kids", "Action"],
+                     extra=["my favourites", "Mecha"])
+    assert kept == ["My Favourites", "PAG-Drama", "PAG-Mecha"]
+
+
+def test_a_refusal_beats_an_answer_and_an_addition_alike():
+    assert plan_tags(current=[], incoming=["Drama", "Kids"], clear=True, prefix="PAG-",
+                     remove=["PAG-Kids"], extra=["kids"]) == ["PAG-Drama"]

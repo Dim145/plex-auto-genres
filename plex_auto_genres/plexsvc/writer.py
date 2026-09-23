@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
 
-from ..models import MediaItem, TagField, fold
+from ..models import MediaItem, TagField, bare_name, fold
 from ..store import Store
 
 log = logging.getLogger(__name__)
@@ -67,19 +67,43 @@ def plan_tags(
     *,
     clear: bool,
     prefix: str = "",
+    remove: tuple[str, ...] | list[str] = (),
+    extra: tuple[str, ...] | list[str] = (),
 ) -> list[str]:
     """Work out the final tag list for an item.
 
     ``clear`` replaces the existing tags outright; otherwise the new ones are
-    merged in, preserving the order Plex already had.
+    merged in, preserving the order Plex already had. The sources' names in
+    ``incoming`` are written with the prefix.
+
+    ``extra`` (always write) and ``remove`` (never write) are what a person
+    decided, and they may name a tag either way: as the app writes it, prefix
+    and all, or as something else put it there -- a collection they made, a
+    genre from Plex's own agent, a star-rating collection. So both match a tag
+    with or without the prefix. An ``extra`` name the item already carries
+    keeps the spelling it has there, and a new one gets the prefix like the
+    sources' names. Merging keeps what Plex already has, which is why
+    ``remove`` reaches into the current tags as well: otherwise a refusal
+    would only ever stop a tag from being *added*.
     """
-    prefixed = [f"{prefix}{tag}" for tag in incoming]
+
+    def spellings(name: str) -> tuple[str, str, str]:
+        bare = bare_name(name, prefix)
+        return fold(name), fold(bare), fold(f"{prefix}{bare}")
+
+    refused = {key for name in remove for key in spellings(name)}
+    on_item = {fold(tag): tag for tag in current}
+    wanted = [f"{prefix}{tag}" for tag in incoming]
+    for name in extra:
+        found = next((on_item[key] for key in spellings(name) if key in on_item), None)
+        wanted.append(found or f"{prefix}{bare_name(name, prefix)}")
+    wanted = [tag for tag in wanted if fold(tag) not in refused]
     if clear:
-        desired = prefixed
+        desired = wanted
     else:
-        desired = list(current)
+        desired = [tag for tag in current if fold(tag) not in refused]
         known = {fold(t) for t in desired}
-        for tag in prefixed:
+        for tag in wanted:
             if fold(tag) not in known:
                 known.add(fold(tag))
                 desired.append(tag)
@@ -121,10 +145,14 @@ class PlexWriter:
         *,
         clear: bool,
         prefix: str = "",
+        remove: tuple[str, ...] | list[str] = (),
+        extra: tuple[str, ...] | list[str] = (),
     ) -> WriteOutcome:
         """Make ``field`` hold the right tags, in a single Plex request."""
         current = list(item.current_tags(field))
-        desired = plan_tags(current, incoming, clear=clear, prefix=prefix)
+        desired = plan_tags(
+            current, incoming, clear=clear, prefix=prefix, remove=remove, extra=extra
+        )
 
         if desired == current:
             return WriteOutcome(changed=False, requests=0, before=current, after=desired)

@@ -369,3 +369,51 @@ def test_the_anilist_tag_threshold_is_part_of_the_fingerprint():
         return config.fingerprint(config.libraries[0])
 
     assert fingerprint(70) != fingerprint(20)
+
+
+def test_a_decision_is_part_of_the_items_fingerprint():
+    """Stamping, not deleting the cached row, is what survives a run under way."""
+    from plex_auto_genres.models import ManualTags
+
+    base = "0123456789abcdef"
+    assert ManualTags().stamp(base) == base, "no decision, no change"
+    one = ManualTags(added=("Mecha",), removed=("Kids",))
+    assert one.stamp(base).startswith(base + "+")
+    assert one.stamp(base) != ManualTags(added=("Mecha",)).stamp(base)
+    assert one.stamp(base) != ManualTags(added=("Mecha",), removed=("Kids",), locked=True).stamp(base)
+    assert ManualTags(added=("A", "B"), locked=True).stamp(base) != ManualTags(
+        added=("B", "A"), locked=True
+    ).stamp(base), "a fixed list is written in its order"
+    renoted = ManualTags(added=("Mecha",), removed=("Kids",), note="why", title="T (2001)")
+    assert renoted.stamp(base) == one.stamp(base), "a note changes nothing written"
+
+
+def test_names_typed_by_hand_are_cleaned_or_refused():
+    from plex_auto_genres.models import clean_names
+
+    assert clean_names([" Drama ", "drama", "", "  ", "Sci-Fi", "sci fi"]) == ["Drama", "Sci-Fi"]
+    for bad in ("★", "!!", "x" * 121):
+        with pytest.raises(ValueError):
+            clean_names([bad])
+
+
+def test_a_name_both_kept_and_refused_is_refused_prefix_or_not():
+    from plex_auto_genres.models import check_decision
+
+    with pytest.raises(ValueError, match="both added and removed"):
+        check_decision(["Sci-Fi"], ["sci fi"])
+    with pytest.raises(ValueError, match="both added and removed"):
+        check_decision(["PAG-Action"], ["Action"], prefix="PAG-")
+    check_decision(["PAG-Action"], ["Action"])      # without that prefix, two names
+
+
+def test_refused_names_go_before_the_cap_not_after():
+    """A refused name must not use up one of the maxGenres slots."""
+    from plex_auto_genres.config import GenreRules
+
+    rules = GenreRules(max_genres=2, replace={"sci-fi": "Science Fiction"})
+    raw = ["Action", "Drama", "Comedy"]
+    assert rules.apply(raw, drop=["action"]) == ["Drama", "Comedy"]
+    assert rules.apply(["Sci-Fi", "Drama"], drop=["science fiction"]) == ["Drama"], (
+        "matched after the renames, as the name ends up in Plex"
+    )

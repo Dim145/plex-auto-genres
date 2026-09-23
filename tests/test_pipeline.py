@@ -14,7 +14,7 @@ from plex_auto_genres.providers.base import HttpTransport
 from plex_auto_genres.ratelimit import LimitSpec
 from plex_auto_genres.store import Store
 
-from .conftest import FakePlexItem
+from .conftest import FakePlexItem, FakeTag
 
 
 class FakeSection:
@@ -920,3 +920,402 @@ def test_a_merged_result_takes_its_rating_from_the_source_that_names_it():
     merged = merge_results([first, second])
     assert merged.provider_id == "1" and merged.score is None
     assert merged.genres == ["Action", "Animation"]
+
+
+# -- genres decided by hand ------------------------------------------------
+
+
+@respx.mock
+async def test_manual_additions_and_removals_layer_over_the_sources(store: Store):
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d+").mock(
+        return_value=jikan_ok(1, genres=("Action", "Drama"))
+    )
+    handle = guid_item()
+    store.set_manual("Animes", "mal://1", added=["Space Opera"], removed=["Drama"],
+                     locked=False)
+    config = make_config(clearGenres=True)
+
+    report = await Pipeline(config, store, FakeServer([handle])).tag_library(config.libraries[0])
+
+    assert report.written == 1
+    assert handle.last_tags == ["Action", "Space Opera"]
+    # The sources were still asked: only what the person decided is fixed.
+    assert store.get_state("Animes", "mal://1").provider == "jikan"
+
+
+@respx.mock
+async def test_a_manual_removal_takes_off_a_tag_already_in_plex(store: Store):
+    """Without clearGenres the writer merges into what Plex holds, so a removal
+    has to reach into that too, or it would never take anything off."""
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d+").mock(
+        return_value=jikan_ok(1, genres=("Action",))
+    )
+    handle = guid_item(genres=("Drama", "Old"))
+    store.set_manual("Animes", "mal://1", added=[], removed=["Old"], locked=False)
+    config = make_config()                           # merge, not replace
+
+    await Pipeline(config, store, FakeServer([handle])).tag_library(config.libraries[0])
+
+    assert handle.last_tags == ["Drama", "Action"]
+
+
+@respx.mock
+async def test_a_locked_item_is_never_asked_about(store: Store):
+    """Locked means decided: no request goes out, and the list is exact."""
+    jikan = respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime\b")
+    handle = guid_item(genres=("Whatever", "Was", "There"))
+    store.set_manual("Animes", "mal://1", added=["Mecha", "Drama"], removed=[], locked=True)
+    config = make_config()                           # merge would keep the old tags
+
+    report = await Pipeline(config, store, FakeServer([handle])).tag_library(config.libraries[0])
+
+    assert not jikan.called
+    assert report.written == 1 and handle.last_tags == ["Mecha", "Drama"]
+    state = store.get_state("Animes", "mal://1")
+    assert (state.provider, state.source) == ("manual", "manual")
+
+
+@respx.mock
+async def test_a_lock_never_clears_a_libraries_collections(store: Store):
+    """Collections also hold the ones people build by hand; a lock replacing
+    the whole field would have wiped them along with the genre ones."""
+    jikan = respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime\b")
+    handle = guid_item(genres=())
+    handle.collections = [FakeTag("My Favourites")]
+    store.set_manual("Animes", "mal://1", added=["Mecha"], removed=[], locked=True)
+    config = make_config(useGenres=False)
+
+    await Pipeline(config, store, FakeServer([handle])).tag_library(config.libraries[0])
+
+    assert not jikan.called
+    assert handle.last_tags == ["My Favourites", "Mecha"]
+
+
+@respx.mock
+async def test_a_name_copied_from_plex_is_matched_without_its_prefix(store: Store):
+    """The console offers the item's collections as Plex spells them, prefix
+    and all; the writer adds the prefix itself, so it has to come off first."""
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d+").mock(
+        return_value=jikan_ok(1, genres=("Drama", "Action"))
+    )
+    handle = guid_item(genres=())
+    handle.collections = [FakeTag("PAG-Action"), FakeTag("My Favourites")]
+    store.set_manual("Animes", "mal://1", added=["PAG-Mecha"], removed=["PAG-Action"],
+                     locked=False)
+    config = AppConfig.model_validate({
+        "version": 2,
+        "libraries": [{"library": "Animes", "type": "anime", "useGenres": False}],
+        "plex": {"collection_prefix": "PAG-"},
+    })
+
+    await Pipeline(config, store, FakeServer([handle])).tag_library(config.libraries[0])
+
+    assert handle.last_tags == ["My Favourites", "PAG-Drama", "PAG-Mecha"]
+
+
+@respx.mock
+async def test_an_empty_lock_means_no_tags_at_all(store: Store):
+    handle = guid_item(genres=("Wrong", "Also Wrong"))
+    store.set_manual("Animes", "mal://1", added=[], removed=[], locked=True)
+    config = make_config()
+
+    report = await Pipeline(config, store, FakeServer([handle])).tag_library(config.libraries[0])
+
+    assert report.written == 1 and handle.last_tags == []
+
+
+@respx.mock
+async def test_manual_additions_are_not_cut_by_the_genre_cap(store: Store):
+    """maxGenres shapes what the sources return; an explicit decision is not that."""
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d+").mock(
+        return_value=jikan_ok(1, genres=("Action", "Drama", "Comedy"))
+    )
+    handle = guid_item()
+    store.set_manual("Animes", "mal://1", added=["Space Opera"], removed=[], locked=False)
+    config = make_config(clearGenres=True, overrides={"maxGenres": 1})
+
+    await Pipeline(config, store, FakeServer([handle])).tag_library(config.libraries[0])
+
+    assert handle.last_tags == ["Action", "Space Opera"]
+
+
+# -- decisions by hand: what the review found ------------------------------
+
+
+def _no_source_knows_it() -> None:
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d+").mock(
+        return_value=httpx.Response(404)
+    )
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime\b").mock(
+        return_value=httpx.Response(200, json={"data": []})
+    )
+
+
+def _prefixed(use_genres: bool) -> AppConfig:
+    return AppConfig.model_validate({
+        "version": 2,
+        "libraries": [{"library": "Animes", "type": "anime", "useGenres": use_genres}],
+        "plex": {"collection_prefix": "PAG-"},
+    })
+
+
+@respx.mock
+async def test_a_refusal_that_leaves_nothing_still_takes_the_tag_off(store: Store):
+    """Raising "nothing left" before the write meant the refused tag stayed
+    on the item for good, and the item sat in failure backoff."""
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d+").mock(
+        return_value=jikan_ok(1, genres=("Drama",))
+    )
+    handle = guid_item(genres=("Drama", "Old"))
+    store.set_manual("Animes", "mal://1", added=[], removed=["Drama"], locked=False)
+    config = make_config()                           # merge, not replace
+
+    report = await Pipeline(config, store, FakeServer([handle])).tag_library(config.libraries[0])
+
+    assert (report.written, report.failed) == (1, 0)
+    assert handle.last_tags == ["Old"]
+    assert store.get_state("Animes", "mal://1").status == "ok"
+
+
+@respx.mock
+async def test_a_refusal_that_leaves_nothing_clears_a_replacing_library(store: Store):
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d+").mock(
+        return_value=jikan_ok(1, genres=("Drama",))
+    )
+    handle = guid_item(genres=("Drama",))
+    store.set_manual("Animes", "mal://1", added=[], removed=["Drama"], locked=False)
+    config = make_config(clearGenres=True)
+
+    report = await Pipeline(config, store, FakeServer([handle])).tag_library(config.libraries[0])
+
+    assert report.written == 1 and handle.last_tags == []
+
+
+@respx.mock
+async def test_rules_that_drop_everything_still_fail_where_a_refusal_would_wipe(store: Store):
+    """With clearGenres, writing the empty list the rules left would wipe the
+    item over a refusal that had nothing to do with it."""
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d+").mock(
+        return_value=jikan_ok(1, genres=("Kids",))    # ignored by the defaults
+    )
+    handle = guid_item(genres=("Drama",))
+    store.set_manual("Animes", "mal://1", added=[], removed=["Horror"], locked=False)
+    config = make_config(clearGenres=True)
+
+    report = await Pipeline(config, store, FakeServer([handle])).tag_library(config.libraries[0])
+
+    assert report.failed == 1 and handle.edits == []
+
+
+@respx.mock
+async def test_additions_stand_when_no_source_knows_the_title(store: Store):
+    """Always write meant "whatever the sources say" -- and was dropped exactly
+    when they had nothing, because the lookup failed first."""
+    _no_source_knows_it()
+    handle = guid_item(genres=("Old",))
+    store.set_manual("Animes", "mal://1", added=["Mecha"], removed=[], locked=False)
+    config = make_config(clearGenres=True)
+
+    report = await Pipeline(config, store, FakeServer([handle])).tag_library(config.libraries[0])
+
+    assert (report.written, report.failed) == (1, 0)
+    assert handle.last_tags == ["Old", "Mecha"], "merged: no answer to replace the tags with"
+    state = store.get_state("Animes", "mal://1")
+    assert (state.status, state.source) == ("ok", "manual")
+
+
+@respx.mock
+async def test_refused_names_do_not_use_up_a_capped_slot(store: Store):
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d+").mock(
+        return_value=jikan_ok(1, genres=("Action", "Drama", "Comedy"))
+    )
+    handle = guid_item()
+    store.set_manual("Animes", "mal://1", added=[], removed=["Action"], locked=False)
+    config = make_config(clearGenres=True, overrides={"maxGenres": 2})
+
+    await Pipeline(config, store, FakeServer([handle])).tag_library(config.libraries[0])
+
+    assert handle.last_tags == ["Drama", "Comedy"]
+
+
+@respx.mock
+async def test_a_decision_saved_while_a_run_is_under_way_is_not_lost(store: Store):
+    """The run that was going records the item under the settings it started
+    with; the decision in the fingerprint is what makes that row stale."""
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d+").mock(
+        return_value=jikan_ok(1, genres=("Action", "Drama"))
+    )
+    handle = guid_item()
+    config = make_config(clearGenres=True)
+    run = config.libraries[0]
+    store.set_manual("Animes", "mal://1", added=["Mecha"], removed=[], locked=True)
+    # What a run that started before the save writes a moment later.
+    store.record_success("Animes", "mal://1", fingerprint=config.fingerprint(run),
+                         title="Cowboy Bebop", year=1998, rating_key=1,
+                         genres=["Action", "Drama"], provider="jikan", provider_id="1")
+
+    report = await Pipeline(config, store, FakeServer([handle])).tag_library(run)
+
+    assert report.skipped == 0 and handle.last_tags == ["Mecha"]
+
+
+@respx.mock
+async def test_a_decision_handed_back_during_a_run_goes_back_to_the_sources(store: Store):
+    jikan = respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d+").mock(
+        return_value=jikan_ok(1, genres=("Action", "Drama"))
+    )
+    handle = guid_item()
+    config = make_config(clearGenres=True)
+    run = config.libraries[0]
+    lock = store.set_manual("Animes", "mal://1", added=["Mecha"], removed=[], locked=True)
+    store.record_success("Animes", "mal://1", fingerprint=lock.stamp(config.fingerprint(run)),
+                         title="Cowboy Bebop", year=1998, rating_key=1, genres=["Mecha"],
+                         provider="manual", provider_id="", source="manual")
+    store.delete_manual("Animes", "mal://1")
+
+    await Pipeline(config, store, FakeServer([handle])).tag_library(run)
+
+    assert jikan.called and handle.last_tags == ["Action", "Drama"]
+
+
+@respx.mock
+async def test_a_decision_made_before_a_v1_librarys_first_run_applies(store: Store):
+    """The imported "Title (Year)" row was promoted onto the item's key and
+    counted as done, and a decision the CLI filed under that key was lost."""
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d+").mock(return_value=jikan_ok())
+    handle = guid_item()                             # "Cowboy Bebop (1998)", mal://1
+    config = make_config(clearGenres=True)
+    run = config.libraries[0]
+    store.record_success("Animes", "Cowboy Bebop (1998)", fingerprint=config.fingerprint(run),
+                         title="Cowboy Bebop", year=1998, rating_key=1, genres=["Old"],
+                         provider="jikan", provider_id="1")
+    store.set_manual("Animes", "Cowboy Bebop (1998)", added=["Mecha"], removed=[], locked=True)
+
+    await Pipeline(config, store, FakeServer([handle])).tag_library(run)
+
+    assert handle.last_tags == ["Mecha"]
+    assert list(store.manual_for_library("Animes")) == ["mal://1"]
+
+
+@respx.mock
+async def test_a_note_edit_does_not_send_the_item_back_to_the_sources(store: Store):
+    jikan = respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d+").mock(
+        return_value=jikan_ok(1, genres=("Action",))
+    )
+    handle = guid_item()
+    store.set_manual("Animes", "mal://1", added=["Mecha"], removed=[], locked=False, note="a")
+    config = make_config()
+    run = config.libraries[0]
+    await Pipeline(config, store, FakeServer([handle])).tag_library(run)
+    calls = jikan.call_count
+
+    store.set_manual("Animes", "mal://1", added=["Mecha"], removed=[], locked=False, note="b")
+    report = await Pipeline(config, store, FakeServer([handle])).tag_library(run)
+
+    assert report.skipped == 1 and jikan.call_count == calls
+
+
+@respx.mock
+async def test_a_lock_keeps_the_score_its_source_gave(store: Store):
+    """The stand-in answer had no score, so every ratings run went back to the
+    sources for a locked item, and rating collections skipped it."""
+    jikan = respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d+").mock(
+        return_value=jikan_ok(1, score=8.0)
+    )
+    handle = guid_item()
+    config = make_config(createRatingCollections=True)
+    run = config.libraries[0]
+    pipeline = Pipeline(config, store, FakeServer([handle]))
+    await pipeline.tag_library(run)
+    store.set_manual("Animes", "mal://1", added=["Mecha"], removed=[], locked=True)
+    await pipeline.tag_library(run)
+
+    state = store.get_state("Animes", "mal://1")
+    assert (state.provider, state.score, state.source) == ("jikan", 8.0, "manual")
+    before = jikan.call_count
+    await pipeline.rate_library(run)
+    assert jikan.call_count == before, "the ratings pass reads the score it kept"
+    assert (await pipeline.rating_collections(run)).written == 1
+
+
+@respx.mock
+async def test_rating_collections_leave_a_refused_collection_off(store: Store):
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d+").mock(
+        return_value=jikan_ok(1, genres=("Action",), score=8.0)
+    )
+    handle = guid_item(genres=())
+    config = make_config(useGenres=False, createRatingCollections=True)
+    run = config.libraries[0]
+    pipeline = Pipeline(config, store, FakeServer([handle]))
+    await pipeline.tag_library(run)
+    store.set_manual("Animes", "mal://1", added=[], removed=["4 Star Rating"], locked=False)
+
+    report = await pipeline.rating_collections(run)
+
+    assert report.written == 0 and "4 Star Rating" not in handle.last_tags
+
+
+def test_items_decided_by_hand_prove_nothing_about_the_sources():
+    from plex_auto_genres.models import RunReport
+
+    report = RunReport(run_id="r", library="Animes", action="genres", dry_run=False)
+    report.deferred, report.written = GIVE_UP_AFTER, 1
+    assert Pipeline._nothing_is_answering(report, None, by_hand=1) is True
+    assert Pipeline._nothing_is_answering(report, None) is False
+
+
+@respx.mock
+async def test_a_lock_keeps_the_spelling_each_name_has_on_the_item(store: Store):
+    """Seeded from the item, a lock re-prefixed Plex's own "Drama" into
+    "PAG-Drama"; a name already on the item keeps its spelling now."""
+    handle = guid_item(genres=("PAG-Action", "Drama"))
+    store.set_manual("Animes", "mal://1", added=["PAG-Action", "Drama", "Mecha"], removed=[],
+                     locked=True)
+    config = _prefixed(use_genres=True)
+
+    await Pipeline(config, store, FakeServer([handle])).tag_library(config.libraries[0])
+
+    assert handle.last_tags == ["PAG-Action", "Drama", "PAG-Mecha"]
+
+
+@respx.mock
+async def test_a_collections_lock_seeded_from_the_item_duplicates_nothing(store: Store):
+    handle = guid_item(genres=())
+    handle.collections = [FakeTag("PAG-Action"), FakeTag("My Favourites"),
+                          FakeTag("4 Star Rating")]
+    store.set_manual("Animes", "mal://1", added=["PAG-Action", "My Favourites", "4 Star Rating"],
+                     removed=[], locked=True)
+    config = _prefixed(use_genres=False)
+
+    report = await Pipeline(config, store, FakeServer([handle])).tag_library(config.libraries[0])
+
+    assert report.unchanged == 1 and handle.edits == []
+
+
+@respx.mock
+async def test_a_refusal_reaches_a_tag_the_app_did_not_write(store: Store):
+    """With a prefix set, only "PAG-Kids" was ever matched: Plex's own "Kids"
+    stayed, though the console showed it struck through."""
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d+").mock(
+        return_value=jikan_ok(1, genres=("Action",))
+    )
+    handle = guid_item(genres=("Kids", "PAG-Action"))
+    store.set_manual("Animes", "mal://1", added=[], removed=["Kids"], locked=False)
+    config = _prefixed(use_genres=True)
+
+    await Pipeline(config, store, FakeServer([handle])).tag_library(config.libraries[0])
+
+    assert handle.last_tags == ["PAG-Action"]
+
+
+@respx.mock
+async def test_a_collections_lock_can_still_refuse(store: Store):
+    """A collections lock never clears, so its refusals are how one comes off."""
+    handle = guid_item(genres=())
+    handle.collections = [FakeTag("PAG-Action"), FakeTag("PAG-Kids")]
+    store.set_manual("Animes", "mal://1", added=["Mecha"], removed=["PAG-Kids"], locked=True)
+    config = _prefixed(use_genres=False)
+
+    await Pipeline(config, store, FakeServer([handle])).tag_library(config.libraries[0])
+
+    assert handle.last_tags == ["PAG-Action", "PAG-Mecha"]

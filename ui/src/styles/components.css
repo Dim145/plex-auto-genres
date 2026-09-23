@@ -1337,7 +1337,8 @@ a.tape__cell:focus-visible {
   flex-wrap: wrap;
 }
 
-.item__genres .chip {
+.item__genres .chip,
+.item__manual .chip {
   margin: 0;
   padding: 0 7px;
   font-size: 11px;
@@ -1499,4 +1500,88 @@ a.tape__cell:focus-visible {
 
 .pins__row .iconbtn {
   margin-left: auto;
+}
+
+/* ---- tags decided by hand ------------------------------------------------ */
+
+.match--manual {
+  color: var(--amber-ink);
+}
+
+.item__manual {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  font-family: var(--font-mono);
+  font-size: var(--fs-12);
+  color: var(--amber-ink);
+}
+
+.button--marked {
+  border-color: color-mix(in srgb, var(--amber) 55%, transparent);
+  color: var(--amber-ink);
+}
+
+.manual {
+  display: grid;
+  gap: 18px;
+}
+
+.manual__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+/* Two classes: pages.css loads after this file, and its one-class .chip
+   rule would otherwise win on every property both of them set. */
+.chip.manual__chip {
+  margin: 0;
+  min-height: 32px;
+  padding: 0 12px;
+  border-color: transparent;
+  background: var(--surface-3);
+  color: var(--ink);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+
+.chip.manual__chip:hover {
+  border-color: var(--line-strong);
+}
+
+.chip.manual__chip.is-off {
+  background: transparent;
+  border-color: var(--line);
+  color: var(--ink-3);
+  text-decoration: line-through;
+}
+
+.manual__summary {
+  margin: 0;
+  padding: 10px 12px;
+  border-left: 2px solid var(--amber);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: var(--surface-3);
+  color: var(--ink-2);
+  font-size: var(--fs-13);
+  line-height: 1.55;
+}
+
+.manual__actions {
+  flex-wrap: wrap;
+  margin-top: 0;
+}
+
+.manual__handback {
+  margin-right: auto;
+  color: var(--fail);
+}
+
+.manual__key {
+  margin: 0;
+  font-size: var(--fs-12);
+  line-height: 1.5;
 }

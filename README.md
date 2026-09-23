@@ -19,6 +19,7 @@ as Plex genre tags or as collections.
 | **Genre tags or collections** | Per library. |
 | **Reversible** | Every write is snapshotted. `plex-auto-genres undo <run-id>` puts it back. |
 | **Manual binding** | Pin an item to an exact provider id when the automatic match is wrong. |
+| **Genres by hand** | Add, refuse or fix an item's genres yourself. The automatic runs keep your decision until you hand the item back. |
 | **Rating collections & posters** | `1–5 Star Rating` collections, collection artwork, sort-title prefixes. |
 | **Built-in scheduler** | No cron inside the container. |
 
@@ -109,7 +110,10 @@ Each library has an **item browser**: every title with how it matched (a manual 
 the id Plex already had, or a title search), what was written, and why it failed if it
 did. From there you can search a provider for the right record — ranked candidates with
 posters and synopses — and **bind** the item to it, or type an id straight in. Bindings
-can also be removed, and a cached result forgotten so the next run retries it.
+can also be removed, and a cached result forgotten so the next run retries it. **Genres…**
+on an item decides its genres by hand (see [When the genres are wrong](#when-the-genres-are-wrong)),
+and the **By hand** filter lists the items that have such a decision. The **Overrides**
+page gathers every binding and every decision across libraries.
 
 ### Security
 
@@ -133,8 +137,8 @@ accounts, on purpose; there is one operator.
 Everything the UI does is plain HTTP — `POST /api/v1/libraries/{name}/run`,
 `GET /api/v1/jobs/{id}/events` (server-sent events), `POST /api/v1/jobs/{id}/cancel`,
 `POST /api/v1/runs/{id}/undo`, `PUT /api/v1/config` with `If-Match`,
-`GET /api/v1/libraries/{name}/items`, `GET /api/v1/search`, `POST`/`DELETE /api/v1/bindings`
-— so it scripts as easily as the CLI.
+`GET /api/v1/libraries/{name}/items`, `GET /api/v1/search`, `POST`/`DELETE /api/v1/bindings`,
+`PUT`/`DELETE /api/v1/manual` — so it scripts as easily as the CLI.
 
 ---
 
@@ -154,6 +158,8 @@ plex-auto-genres undo 4f2a1c9b0e77                # restore a run's previous tag
 
 plex-auto-genres bind Animes "Monster" mal 19     # pin a provider id
 plex-auto-genres bindings
+plex-auto-genres manual Animes "Monster" --add Psychological   # decide genres by hand
+plex-auto-genres manuals
 plex-auto-genres schema                           # config JSON Schema
 ```
 
@@ -193,6 +199,50 @@ An AniDB id is translated to MyAnimeList through the same offline table that
 handles `anidb://` GUIDs, and TMDB cross-references IMDb and TheTVDB ids to its
 own. Anything else is refused at the point you set it, rather than stored and
 quietly ignored on every run.
+
+### When the genres are wrong
+
+When the match is right but the genres are not — a source misses one, keeps one that
+does not fit, or has nothing for the title at all — decide them by hand, from
+**Genres…** on the item in the console or from the CLI. There are three instructions,
+the same ones [Kometa](https://kometa.wiki/en/latest/files/metadata/) uses for this job:
+
+| | Console | CLI | What the next runs do |
+|---|---|---|---|
+| **Always write** | Add or refuse | `--add NAME` | Written whatever the sources say, even when they have nothing for the title. |
+| **Never write** | Add or refuse | `--remove NAME` | Kept off even when a source returns it, and taken off if it is already on the item. |
+| **Set exactly** | Set exactly | `--lock` (with `--add`) | The sources are no longer asked, and the genres are exactly yours. An empty list means no genres. |
+
+```bash
+plex-auto-genres manual Animes "Monster" --add Psychological --remove Kids --note "the sources lump it in"
+plex-auto-genres manual Animes "Monster (2004)" --lock --add Psychological --add Thriller
+plex-auto-genres manuals --library Animes          # what is decided, and why
+plex-auto-genres unmanual Animes "Monster"          # hand it back to the sources
+```
+
+A decision outranks the sources until it is handed back, and nothing automatic undoes
+it: the ignore and replace rules shape what the sources return, and a decision is not
+that. A refused name does not use up one of the `maxGenres` slots, and a name you add is
+never cut by the cap. The decision is part of what the cache remembers about the item,
+so the next run reprocesses it — even when it was saved while a run was going — while
+editing only the note re-asks nothing. A locked item keeps the rating its last source
+answer gave.
+
+The CLI takes a title as Plex shows it (add the year when two items share it) or the
+item's key as the console shows it, such as `tmdb://1234`. `manual` replaces whatever
+was decided on the item before, and says so; the note is kept unless you give
+`--note` (`--note ""` clears it).
+
+In a library that writes **collections**, the lock is called *stop asking*: no source is
+asked, the names you add are written and the ones you refuse are taken off, but the
+item's other collections stay. Collections also hold the ones people make by hand,
+which is why `clearGenres` is refused there. A name matches a tag with or without
+`PLEX_COLLECTION_PREFIX`, so you can refuse a collection the app wrote, one you made, or
+a star-rating one alike.
+
+Handing an item back asks the sources again from the next run. Where the library merges
+rather than replaces (no `clearGenres`, and every collections library), the names a
+decision added stay on the item like any other tag: refuse them first to take them off.
 
 ### When a source stops answering
 
@@ -472,7 +522,7 @@ planned:
 ```
 plex_auto_genres/
   config.py      pydantic models -> validation and a JSON Schema for forms
-  store.py       SQLite: cache, manual bindings, undo snapshots, run history
+  store.py       SQLite: cache, bindings, genres decided by hand, undo snapshots, runs
   pipeline.py    async orchestration, one library per run
   providers/     tmdb, jikan, anilist + the AniDB->MAL id mapping
   plexsvc/       reading libraries and writing tags back

@@ -172,6 +172,19 @@ a.list__main:hover {
   color: var(--ink-3);
 }
 
+/* A name decided by hand: always written, or never. */
+.chip--add {
+  border-color: transparent;
+  background: var(--amber-dim);
+  color: var(--amber-ink);
+}
+
+.chip--drop {
+  border-color: var(--line);
+  color: var(--ink-3);
+  text-decoration: line-through;
+}
+
 .tone-fail { color: var(--fail); }
 .tone-amber { color: var(--amber-ink); }
 .tone-teal { color: var(--teal-ink); }

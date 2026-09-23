@@ -262,7 +262,41 @@ export interface SaveResult {
   errors: ValidationIssue[];
 }
 
-export type MatchSource = "binding" | "guid" | "search";
+export type MatchSource = "binding" | "guid" | "search" | "manual";
+
+/**
+ * Genres (or collections) decided by hand. They outrank the sources until the
+ * override is removed: `added` is always written, `removed` never is, and a
+ * `locked` item is no longer looked up. A locked genre list is exactly
+ * `added`; collections are never cleared, so a locked collection item gets
+ * `added` and loses `removed`, nothing else.
+ */
+export interface ManualView {
+  added: string[];
+  removed: string[];
+  locked: boolean;
+  note: string | null;
+  /** The item's name when this was decided. */
+  title: string | null;
+  updated_at: number;
+  /** Whether the library's last run applied this decision as it stands; null where not worked out. */
+  applied: boolean | null;
+}
+
+export interface ManualEntry extends ManualView {
+  library: string;
+  media_key: string;
+}
+
+export interface ManualIn {
+  library: string;
+  media_key: string;
+  added: string[];
+  removed: string[];
+  locked: boolean;
+  note?: string | null;
+  title?: string | null;
+}
 
 export interface ItemState {
   status: "ok" | "failed";
@@ -284,12 +318,14 @@ export interface ItemView {
   match: MatchSource;
   /** Every id pinned on this item: one per source at most. */
   bindings: BindingView[];
+  /** Tags decided by hand, which outrank the sources until removed. */
+  manual: ManualView | null;
   state: ItemState | null;
   current_genres: string[];
   current_collections: string[];
 }
 
-export type ItemStatusFilter = "all" | "ok" | "failed" | "unprocessed" | "bound";
+export type ItemStatusFilter = "all" | "ok" | "failed" | "unprocessed" | "bound" | "manual";
 
 export interface ItemsPage {
   library: string;

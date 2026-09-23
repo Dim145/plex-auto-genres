@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..config import GenreRules, LibraryRun, ScheduleSettings
-from ..models import MediaType
+from ..models import MediaType, check_decision, clean_names
 
 
 class PlexStatus(BaseModel):
@@ -247,7 +247,7 @@ class SaveResult(BaseModel):
     errors: list[ValidationIssue] = Field(default_factory=list)
 
 
-MatchSource = Literal["binding", "guid", "search"]
+MatchSource = Literal["binding", "guid", "search", "manual"]
 
 
 class ItemState(BaseModel):
@@ -262,6 +262,28 @@ class ItemState(BaseModel):
     updated_at: float
 
 
+class ManualView(BaseModel):
+    """What a person decided about one item's genres (or collections)."""
+
+    added: list[str] = Field(default_factory=list)
+    removed: list[str] = Field(default_factory=list)
+    locked: bool = False
+    note: str | None = None
+    #: The item's name when this was decided.
+    title: str | None = None
+    updated_at: float
+    #: Whether the library's last run applied this decision as it stands;
+    #: null where that is not worked out (the list of every override).
+    applied: bool | None = None
+
+
+class ManualEntry(ManualView):
+    """A manual override, with the item it belongs to."""
+
+    library: str
+    media_key: str
+
+
 class ItemView(BaseModel):
     """One library item, joined with how it matched and what was written."""
 
@@ -274,6 +296,8 @@ class ItemView(BaseModel):
     match: MatchSource
     #: Every id pinned on this item: one per source at most.
     bindings: list[BindingView] = Field(default_factory=list)
+    #: Tags decided by hand, which outrank the sources until removed.
+    manual: ManualView | None = None
     state: ItemState | None = None
     current_genres: list[str] = Field(default_factory=list)
     current_collections: list[str] = Field(default_factory=list)
@@ -309,6 +333,40 @@ class CandidateView(BaseModel):
     synopsis: str | None = None
     score: float | None = None
     genres: list[str] = Field(default_factory=list)
+
+
+class ManualIn(BaseModel):
+    """Decide an item's tags by hand: add some, refuse some, or fix them all."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    library: str = Field(min_length=1)
+    media_key: str = Field(min_length=1)
+    added: list[str] = Field(default_factory=list, max_length=100)
+    removed: list[str] = Field(default_factory=list, max_length=100)
+    locked: bool = Field(
+        default=False,
+        description=(
+            "The sources are no longer asked. For genres the list is then exactly "
+            "'added'; collections get 'added' and lose 'removed', nothing else."
+        ),
+    )
+    note: str | None = Field(default=None, max_length=500)
+    title: str | None = Field(
+        default=None, max_length=300,
+        description="The item's name, kept so a list of overrides can show it.",
+    )
+
+    @field_validator("added", "removed")
+    @classmethod
+    def _clean(cls, names: list[str]) -> list[str]:
+        return clean_names(names)
+
+    @model_validator(mode="after")
+    def _coherent(self) -> "ManualIn":
+        # The collection prefix is checked again where it is known, the route.
+        check_decision(self.added, self.removed)
+        return self
 
 
 class BindingIn(BaseModel):

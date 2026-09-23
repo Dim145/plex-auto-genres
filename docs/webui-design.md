@@ -686,6 +686,101 @@ genres (all filtered by your ignore rules?)" sent people to look at rules that w
 often innocent; when the rules really are the cause it now says so as a fact, with how
 many names they dropped.
 
+### Genres decided by hand — done
+
+Asked for a way to set an item's genres by hand, with the rule that whatever a person
+changed is no longer updated by the automatic sources until the override is removed.
+
+The shape is borrowed from [Kometa](https://kometa.wiki/en/latest/files/metadata/)'s tag attributes, which cover
+the same job for Plex metadata: `genre` appends, `genre.remove` takes off, `genre.sync`
+makes the list exact. Here those are *always write*, *never write* and *set exactly*.
+A lock alone would have been simpler and worse: most corrections are one name — a
+genre a source misses, one it gets wrong — and freezing the whole list for that would
+also freeze out every later improvement the sources make to the rest of it. So the two
+finer instructions layer over what the sources return, and the lock is there for the
+titles no source covers well.
+
+Where it sits: around the library's rules. The ignore and replace rules shape what a
+source returns; an explicit decision is not that. A refused name is dropped after the
+renames — it names a tag as it ends up in Plex — and before the `maxGenres` cap, so it
+does not use up a slot; a name someone added is never cut by the cap. The tag pass
+asks no source about a locked item, which keeps the identity and score of its last
+answer so the ratings pass has no reason to either, and an empty lock is honoured as
+"no genres".
+
+The decision is part of each item's cache fingerprint (`ManualTags.stamp`), rather than
+a reason to delete the cached row. The first build deleted it on every save, and a run
+already under way then recorded the item a moment later under the unchanged settings
+fingerprint: the decision was skipped from then on. With the stamp, a row made under
+another decision — or none, or a v1 import — is simply stale, a note-only edit
+re-asks nothing, and the score and the item's name survive.
+
+What the obvious version gets wrong, each with a test:
+
+* **Refusals that leave nothing.** Raising "nothing left" before the write left the
+  refused tag on the item and the item in failure backoff. A refusal is a decision and
+  is written; only the rules emptying the list on their own still fails, as before.
+* **A source with nothing for the title.** The lookup failed first, so *always write*
+  was dropped exactly when it mattered. What the person decided now stands alone,
+  merged into what Plex holds, since there is no answer to replace the tags with.
+* **Removal in merge mode.** Without `clearGenres` the writer merges into what Plex
+  holds, so a *never write* that only filtered the sources' answer would never take
+  anything off. `plan_tags` takes refused names off the current tags too — and the
+  rating-collections pass honours them, or it put a refused star collection back.
+* **A lock over collections.** Replacing the whole field would wipe the collections
+  people build themselves — the reason `clearGenres` is refused for collections in the
+  first place. A lock clears genres; for collections it only stops the lookup, and
+  keeps its refusals, which are then the one way a collection comes off.
+* **The collection prefix.** A person may name a tag the app wrote (`PAG-Action`) or
+  one it did not (Plex's own `Kids`, a collection they made). Stripping the prefix off
+  names made a lock seeded from the item write `PAG-My Favourites` beside the real one,
+  and matched refusals against the prefixed spelling only. Names are now stored as
+  given, `plan_tags` matches a decision with the prefix or without it, and a name the
+  item already carries keeps its spelling.
+* **Titles in the CLI.** Items are keyed by GUID whenever Plex has one, so a title
+  stored as the key would never match and never say so. The override keeps the item's
+  name; the CLI resolves a typed title against the cache and the overrides, lists the
+  candidates when two items share it, refuses a blank one (it matched every untitled
+  decision) and a name it has never seen, and spells a typed key the way the pipeline
+  does. `bind` has the same flaw and is left for its own change.
+
+Deliberately not done: treating an edit made directly in Plex as an override. Plex's
+own field lock cannot tell a person's edit from ours — the writer locks every field it
+writes — so detecting one means comparing the tags on the item with what the last run
+wrote, and adopting any difference permanently would also freeze an accidental edit.
+That is a product decision first.
+
+### Review pass 3 — done
+
+The genres-by-hand change went through the full review before it was committed: ten
+finder angles (line scan, removed behaviour, cross-file callers, language pitfalls,
+stand-ins, reuse, simplification, efficiency, altitude, conventions), one adversarial
+verifier per candidate, and a sweep for what those missed; plus semgrep, bandit, ruff
+against the previous commit, mypy, gitleaks, pip-audit and pnpm audit.
+
+About thirty distinct defects were confirmed, every one reproduced, none refuted —
+which says more about the first cut than about the review. The ones that mattered are
+listed above with their fixes. The rest:
+
+* the 422 FastAPI returns carries its messages in a list, which the console showed as
+  "[object Object]"; the client now reads them, and the dialog catches the same
+  mistakes before sending;
+* a name with no letter or digit ("★") was dropped without a word, so a lock on one
+  became an empty lock that cleared the item; it is refused now, in the API and the CLI;
+* the CLI neither stripped names nor enforced the API's limits (`" Drama "` replaced
+  the real Drama), and silently discarded `--remove` under `--lock`; both now go
+  through the same `clean_names` and `check_decision`;
+* locked writes counted as proof a source answered, which disarmed the stop for a
+  library whose sources were all refusing;
+* an early build of the table lacked the `title` column under the same schema version,
+  so it is also listed as an added column;
+* the base `.chip` rule, loaded later, overrode the new chip colours; the editor
+  recomputed its suggestions quadratically on every keystroke of the page, open or
+  not, and is now mounted per item; the item list is patched as soon as a decision is
+  saved, so reopening it straight away no longer starts from the old one;
+* the demo's fake Plex ignored an edit that only removes tags, so an empty lock looked
+  like it did nothing there.
+
 ### Next
 
 Decide where secrets should live if they are ever to be edited from the UI — the

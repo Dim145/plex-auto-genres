@@ -21,7 +21,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import AppConfig, LibraryRun
+from .config import AppConfig, GenreRules, LibraryRun
 from .errors import (
     PlexConnectionError,
     ProviderAuthError,
@@ -29,7 +29,16 @@ from .errors import (
     ProviderNotFound,
     ProviderUnavailable,
 )
-from .models import ExternalId, ItemOutcome, MediaItem, ProviderResult, RunReport, TagField
+from .models import (
+    ExternalId,
+    ItemOutcome,
+    ManualTags,
+    MediaItem,
+    ProviderResult,
+    RunReport,
+    TagField,
+    bare_name,
+)
 from .plexsvc import client as plex_client
 from .plexsvc.writer import PlexWriter, sort_collections, upload_posters
 from .providers import AniDbMapper, LookupRequest, Provider, ProviderPool, build_providers
@@ -79,6 +88,50 @@ def merge_results(results: list[ProviderResult]) -> ProviderResult:
     )
     merged.matched_by = first.matched_by
     return merged
+
+
+#: The decision of an item nobody decided anything about.
+NO_DECISION = ManualTags()
+
+
+def _decided_result(item: MediaItem, previous: CachedState | None) -> ProviderResult:
+    """What stands in for a source's answer on an item decided by hand.
+
+    It keeps the identity and score of the last source answer when there was
+    one: the ratings pass reads the score from the cache, and without it
+    every locked item went back to the sources each night for a number the
+    cache already had.
+    """
+    result = ProviderResult(
+        provider="manual", provider_id="", title=item.title, matched_by="manual"
+    )
+    if previous is not None and previous.status == "ok" and previous.provider:
+        result.provider = previous.provider
+        result.provider_id = previous.provider_id or ""
+        result.score = previous.score
+    return result
+
+
+def _sources_names(
+    result: ProviderResult, rules: GenreRules, manual: ManualTags, *, prefix: str, clear: bool
+) -> list[str]:
+    """The sources' names for one item, its refused ones left out.
+
+    Raises when there is nothing to do. A refusal that emptied the list is a
+    decision and is written: that is how a refused tag comes off. The rules
+    emptying it on their own are not, since writing their empty list would
+    wipe the item over nothing anyone decided -- though a merge still takes
+    refused names off what Plex holds.
+    """
+    automatic = rules.apply(result.genres, drop=[bare_name(n, prefix) for n in manual.removed])
+    if automatic or manual.added or (manual.removed and (not clear or rules.apply(result.genres))):
+        return automatic
+    # It answered, so the names are gone by our own doing. Blaming the source
+    # for "no usable genres" sent people looking in the wrong place.
+    raise ProviderNotFound(
+        f"{result.provider} returned {len(result.genres)} name(s), and your ignore and "
+        "replace rules dropped every one of them"
+    )
 
 
 def media_key(item: MediaItem) -> str:
@@ -179,6 +232,7 @@ class Pipeline:
         report = scope.report
         waiting = set(tasks)
         tallied: set[asyncio.Task] = set()
+        by_hand = 0
         try:
             while waiting:
                 landed, waiting = await asyncio.wait(
@@ -188,9 +242,10 @@ class Pipeline:
                     outcome = task.result()
                     tallied.add(task)
                     self._tally(report, outcome)
+                    by_hand += outcome.by_hand
                     if progress is not None:
                         progress(outcome)
-                if self._nothing_is_answering(report, pool):
+                if self._nothing_is_answering(report, pool, by_hand):
                     report.error = (
                         f"Stopped after {GIVE_UP_AFTER} titles no source could answer, with "
                         "nothing at all getting through. The rest of the library was left "
@@ -208,7 +263,9 @@ class Pipeline:
             raise
 
     @staticmethod
-    def _nothing_is_answering(report: RunReport, pool: ProviderPool | None) -> bool:
+    def _nothing_is_answering(
+        report: RunReport, pool: ProviderPool | None, by_hand: int = 0
+    ) -> bool:
         """Enough titles deferred, and not one answer from any source.
 
         Counting deferrals *in a row* read well and was wrong: a deferral
@@ -216,12 +273,14 @@ class Pipeline:
         another thread, so completion order bunches deferrals together and a
         half-healthy library looked dead. The pool is asked instead, because it
         counts answers when they arrive rather than when they finish landing.
+        Items written from a decision alone (``by_hand``) prove nothing about
+        the sources, so they do not count as an answer.
         """
         if report.deferred < GIVE_UP_AFTER:
             return False
         if pool is not None and pool.answers:
             return False
-        return not (report.written or report.unchanged or report.failed)
+        return report.written + report.unchanged + report.failed <= by_hand
 
     async def _settle(
         self,
@@ -283,46 +342,49 @@ class Pipeline:
             log.debug("%s: %d items in library", run.library, len(items))
 
             states = self.store.states_for_library(run.library)
-            pending = self._pending(items, run, fingerprint, states)
+            manuals = self.store.manual_for_library(run.library)
+            pending = self._pending(items, run, fingerprint, states, manuals)
             report.skipped = len(items) - len(pending)
             if on_begin is not None:
                 on_begin(report.run_id, len(items), len(pending))
             if not pending:
                 return report
 
-            settings = self.config.providers
-            pool = build_providers(run.resolved_providers, run.type, settings)
+            pool = build_providers(run.resolved_providers, run.type, self.config.providers)
             mapper = AniDbMapper(self.store, enabled=run.type.is_anime)
             bindings = self.store.bindings_for_library(run.library)
+            prefix = self.config.plex.collection_prefix
 
-            fetch_sem = asyncio.Semaphore(settings.concurrency)
+            fetch_sem = asyncio.Semaphore(self.config.providers.concurrency)
             # Plex is a single home server; a couple of concurrent writes is plenty.
             write_sem = asyncio.Semaphore(2)
 
             async def handle(item: MediaItem) -> ItemOutcome:
                 key = media_key(item)
+                manual = manuals.get(key, NO_DECISION)
+                # A lock is the whole list, whatever the library's clearGenres
+                # says: merging would keep tags the person has already decided
+                # against. Never for collections, though: those also hold the
+                # ones people make themselves, and clearing them is refused in
+                # the config for that very reason.
+                clear = run.clear_genres or (manual.locked and field is TagField.GENRE)
                 try:
-                    async with fetch_sem:
-                        result = await self._resolve(item, run, pool, mapper, bindings)
-                    genres = rules.apply(result.genres)
-                    if not genres:
-                        # It answered, so the names are gone by our own doing.
-                        # Blaming the source for "no usable genres" sent people
-                        # looking in the wrong place.
-                        raise ProviderNotFound(
-                            f"{result.provider} returned "
-                            f"{len(result.genres)} name(s), and your ignore and "
-                            f"replace rules dropped every one of them"
-                        )
+                    result, automatic, clear = await self._answer(
+                        item, run, manual, states.get(key), clear=clear, rules=rules,
+                        prefix=prefix, fetch_sem=fetch_sem, pool=pool, mapper=mapper,
+                        bindings=bindings,
+                    )
 
                     async with write_sem:
                         outcome = await asyncio.to_thread(
                             writer.write_tags,
                             item,
                             field,
-                            genres,
-                            clear=run.clear_genres,
-                            prefix=self.config.plex.collection_prefix,
+                            automatic,
+                            clear=clear,
+                            prefix=prefix,
+                            remove=manual.removed,
+                            extra=manual.added,
                         )
                         if run.rate_media and result.score is not None:
                             await asyncio.to_thread(writer.set_rating, item, result.score)
@@ -330,8 +392,8 @@ class Pipeline:
                     if not self.dry_run:
                         self.store.record_success(
                             run.library, key,
-                            fingerprint=fingerprint, title=item.title, year=item.year,
-                            rating_key=item.rating_key, genres=outcome.after,
+                            fingerprint=manual.stamp(fingerprint), title=item.title,
+                            year=item.year, rating_key=item.rating_key, genres=outcome.after,
                             provider=result.provider, provider_id=result.provider_id,
                             score=result.score, source=result.matched_by,
                         )
@@ -341,6 +403,7 @@ class Pipeline:
                         genres=outcome.after,
                         provider=result.provider,
                         provider_id=result.provider_id,
+                        by_hand=result.matched_by == "manual",
                     )
 
                 except ProviderUnavailable as exc:
@@ -355,7 +418,8 @@ class Pipeline:
                     if not self.dry_run:
                         self.store.record_failure(
                             run.library, key,
-                            fingerprint=fingerprint, title=item.title, year=item.year,
+                            fingerprint=manual.stamp(fingerprint), title=item.title,
+                            year=item.year,
                             rating_key=item.rating_key, error=str(exc),
                         )
                     return ItemOutcome(
@@ -367,7 +431,8 @@ class Pipeline:
                     if not self.dry_run:
                         self.store.record_failure(
                             run.library, key,
-                            fingerprint=fingerprint, title=item.title, year=item.year,
+                            fingerprint=manual.stamp(fingerprint), title=item.title,
+                            year=item.year,
                             rating_key=item.rating_key, error=f"{type(exc).__name__}: {exc}",
                         )
                     return ItemOutcome(item=item, status="failed", error=str(exc))
@@ -380,19 +445,56 @@ class Pipeline:
             report.plex_requests = writer.requests
             return report
 
+    async def _answer(
+        self,
+        item: MediaItem,
+        run: LibraryRun,
+        manual: ManualTags,
+        previous: CachedState | None,
+        *,
+        clear: bool,
+        rules: GenreRules,
+        prefix: str,
+        fetch_sem: asyncio.Semaphore,
+        pool: ProviderPool,
+        mapper: AniDbMapper,
+        bindings: Bindings,
+    ) -> tuple[ProviderResult, list[str], bool]:
+        """What to write for one item: the answer, the sources' names, and
+        whether to clear the field first."""
+        if manual.locked:
+            # Decided by hand: the sources are not asked, and an empty genre
+            # list here means "no genres", on purpose.
+            return _decided_result(item, previous), [], clear
+        try:
+            async with fetch_sem:
+                result = await self._resolve(item, run, pool, mapper, bindings)
+        except ProviderNotFound:
+            # No source has anything for this title, and what the person
+            # decided stands on its own. It is merged, not replaced: there is
+            # no answer to replace the tags with.
+            if not (manual.added or manual.removed):
+                raise
+            return _decided_result(item, previous), [], False
+        return result, _sources_names(result, rules, manual, prefix=prefix, clear=clear), clear
+
     def _pending(
         self,
         items: list[MediaItem],
         run: LibraryRun,
         fingerprint: str,
         states: dict[str, CachedState],
+        manuals: dict[str, ManualTags],
     ) -> list[MediaItem]:
         """The items the cache says still need work under these settings.
 
         ``states`` is the library's whole cache, loaded in one query; the skip
-        rule itself is arithmetic. Rows imported from v1's progress files are
-        keyed ``"Title (Year)"``; when an item now has a GUID key, its legacy
-        row is adopted and moved under the new key so the import counts.
+        rule itself is arithmetic. An item's decision by hand is part of its
+        fingerprint, so a cached result made under another decision is stale.
+        Rows imported from v1's progress files are keyed ``"Title (Year)"``;
+        when an item now has a GUID key, its legacy row is adopted and moved
+        under the new key so the import counts, and a decision filed under the
+        old key moves with it (``manuals`` is updated in place).
         """
         now = time.time()
         promotions: dict[str, str] = {}
@@ -404,7 +506,10 @@ class Pipeline:
                 state = states.get(item.identifier)
                 if state is not None:
                     promotions[item.identifier] = key
-            if Store.needs_work(state, fingerprint, force=self.force, now=now):
+                    if key not in manuals and item.identifier in manuals:
+                        manuals[key] = manuals.pop(item.identifier)
+            stamped = manuals.get(key, NO_DECISION).stamp(fingerprint)
+            if Store.needs_work(state, stamped, force=self.force, now=now):
                 pending.append(item)
         if promotions:
             moved = self.store.rename_media_keys(run.library, promotions)
@@ -579,8 +684,14 @@ class Pipeline:
 
     @staticmethod
     def _cached_score(state: CachedState | None, fingerprint: str) -> float | None:
-        """The score the tag action already fetched, if it is still current."""
-        if state is None or state.status != "ok" or state.fingerprint != fingerprint:
+        """The score the tag action already fetched, if it is still current.
+
+        A decision by hand stamps the fingerprint (``base+decision``) without
+        changing where the score came from, so only the settings part counts.
+        """
+        if state is None or state.status != "ok":
+            return None
+        if state.fingerprint.split("+", 1)[0] != fingerprint:
             return None
         return state.score
 
@@ -669,6 +780,10 @@ class Pipeline:
             if on_begin is not None:
                 on_begin(report.run_id, len(items), len(items))
             states = self.store.states_for_library(run.library)
+            # A collection the person refused stays off, rating bucket or not.
+            # Only where decisions are about collections: in a genre library
+            # they name genres, and a collection spelt the same is not theirs.
+            manuals = {} if run.use_genres else self.store.manual_for_library(run.library)
             write_sem = asyncio.Semaphore(2)
 
             async def handle(item: MediaItem) -> ItemOutcome:
@@ -684,7 +799,8 @@ class Pipeline:
                 try:
                     async with write_sem:
                         outcome = await asyncio.to_thread(
-                            writer.write_tags, item, TagField.COLLECTION, [bucket], clear=False
+                            writer.write_tags, item, TagField.COLLECTION, [bucket], clear=False,
+                            remove=manuals.get(media_key(item), NO_DECISION).removed,
                         )
                 except Exception as exc:  # one refused write must not abort the pass
                     log.warning("Could not set the rating collection of %s: %s", item.title, exc)

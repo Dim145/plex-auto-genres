@@ -24,6 +24,7 @@ import logging
 import os
 import shutil
 import tempfile
+from collections.abc import Iterable
 from functools import cached_property
 from pathlib import Path
 from typing import Any, Literal
@@ -154,14 +155,18 @@ class GenreRules(BaseModel):
             fold(k): v for k, v in self.replace.items()
         }
 
-    def apply(self, genres: list[str]) -> list[str]:
+    def apply(self, genres: list[str], drop: Iterable[str] = ()) -> list[str]:
         """Run ignore -> replace -> dedupe -> cap over a raw provider list.
 
         Every comparison goes through :func:`fold`, so spelling variants of one
         name collapse instead of becoming two collections -- which is what
-        merging several sources produces on its own.
+        merging several sources produces on its own. ``drop`` names what one
+        item refuses by hand. It is matched after the renames, since it names
+        tags as they end up in Plex, and before the cap: a refused name must
+        not use up one of the ``maxGenres`` slots.
         """
         ignore, renames = self._folded
+        refused = {fold(name) for name in drop}
         out: list[str] = []
         seen: set[str] = set()
         for genre in genres:
@@ -172,7 +177,7 @@ class GenreRules(BaseModel):
             dedupe_key = fold(resolved)
             # Re-check ignore against the replacement so a rename cannot
             # resurrect a genre the user asked to drop.
-            if dedupe_key in ignore:
+            if dedupe_key in ignore or dedupe_key in refused:
                 continue
             if dedupe_key in seen:
                 continue

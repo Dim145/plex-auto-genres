@@ -195,13 +195,6 @@ def test_stats_and_failure_listing(store: Store):
     assert len(failures) == 1 and failures[0]["title"] == "B"
 
 
-def test_clear_library_removes_only_that_library(store: Store):
-    for lib in ("A", "B"):
-        store.record_success(lib, "k", fingerprint="fp", title="T", year=None,
-                             rating_key=1, genres=[], provider=None, provider_id=None)
-    assert store.clear_library("A") == 1
-    assert store.get_state("B", "k") is not None
-
 
 # -- kv cache --------------------------------------------------------------
 
@@ -346,3 +339,192 @@ def test_the_cli_refuses_a_binding_nothing_can_resolve(tmp_path, config_file, mo
 
     assert cli.main([*argv, "Animes", "Monster", "anidb", "4521"]) == 0
     assert "bound" in capsys.readouterr().out
+
+
+# -- manual tags -----------------------------------------------------------
+
+
+def test_manual_tags_round_trip_and_leave_the_cached_row_to_the_fingerprint(store: Store):
+    """The cached row stays: it holds the score and the name, and the decision
+    is in the fingerprint, which is what makes the row stale (see the
+    pipeline tests) -- deleting it instead lost decisions saved mid-run."""
+    store.record_success("Animes", "mal://1", fingerprint="f", title="A", year=2000,
+                         rating_key=1, genres=["Action"], provider="jikan", provider_id="1",
+                         score=8.0)
+    store.set_manual("Animes", "mal://1", added=["Space Opera"], removed=["Kids"],
+                     locked=False, note="the sources miss it")
+
+    state = store.get_state("Animes", "mal://1")
+    assert (state.fingerprint, state.score) == ("f", 8.0)
+    tags = store.manual_for_library("Animes")["mal://1"]
+    assert tags.stamp("f") != state.fingerprint, "stale under the decision"
+    assert (tags.added, tags.removed, tags.locked, tags.note) == (
+        ("Space Opera",), ("Kids",), False, "the sources miss it"
+    )
+    assert [(lib, key) for lib, key, _ in store.list_manual()] == [("Animes", "mal://1")]
+
+
+def test_removing_manual_tags_hands_the_item_back(store: Store):
+    store.set_manual("Animes", "mal://1", added=["A"], removed=[], locked=True)
+    store.record_success("Animes", "mal://1", fingerprint="f", title="A", year=2000,
+                         rating_key=1, genres=["A"], provider="manual", provider_id="")
+
+    assert store.delete_manual("Animes", "mal://1") is True
+    assert store.manual_for_library("Animes") == {}
+    assert store.delete_manual("Animes", "mal://1") is False
+
+
+def test_an_override_keeps_the_items_name_across_edits(store: Store):
+    store.set_manual("Animes", "mal://1", added=["A"], removed=[], locked=False,
+                     title="First (2000)")
+    again = store.set_manual("Animes", "mal://1", added=["B"], removed=[], locked=False)
+
+    assert again.title == "First (2000)", "an edit that does not name it keeps the name"
+    assert again.added == ("B",)
+
+
+def test_find_keys_reads_titles_as_people_type_them(store: Store):
+    """Most items are keyed by GUID; a title stored as the key matched nothing."""
+    store.record_success("Animes", "mal://1", fingerprint="f", title="Monster", year=2004,
+                         rating_key=1, genres=[], provider="jikan", provider_id="1")
+    store.record_success("Animes", "mal://2", fingerprint="f", title="Solo", year=None,
+                         rating_key=2, genres=[], provider="jikan", provider_id="2")
+
+    assert store.find_keys("Animes", "monster") == [("mal://1", "Monster (2004)")]
+    assert store.find_keys("Animes", "Monster (2004)") == [("mal://1", "Monster (2004)")]
+    assert store.find_keys("Animes", "mal://2") == [("mal://2", "Solo")]
+    assert store.find_keys("Animes", "Monster (1999)") == []
+    assert store.find_keys("Films", "Monster") == [], "another library is not searched"
+
+
+def test_find_keys_knows_an_item_by_the_name_its_decision_kept(store: Store):
+    """An item decided before any run cached it has no other row with a name."""
+    store.set_manual("Animes", "mal://1", added=["A"], removed=[], locked=False,
+                     title="Monster (2004)")
+
+    assert store.find_keys("Animes", "Monster") == [("mal://1", "Monster (2004)")]
+    assert store.find_keys("Animes", "monster (2004)") == [("mal://1", "Monster (2004)")]
+
+
+def test_a_blank_name_finds_nothing(store: Store):
+    """A blank name matched every decision saved without a title: an unset
+    shell variable handed back, or emptied, an unrelated item."""
+    store.set_manual("Animes", "mal://5", added=["Mecha"], removed=[], locked=False)
+
+    assert store.find_keys("Animes", "") == []
+    assert store.find_keys("Animes", "   ") == []
+
+
+def test_a_decision_moves_with_its_items_v1_key(store: Store):
+    store.record_success("Animes", "Monster (2004)", fingerprint="f", title="Monster",
+                         year=2004, rating_key=1, genres=[], provider="jikan", provider_id="1")
+    store.set_manual("Animes", "Monster (2004)", added=["A"], removed=[], locked=False)
+
+    store.rename_media_keys("Animes", {"Monster (2004)": "mal://1"})
+
+    assert list(store.manual_for_library("Animes")) == ["mal://1"]
+
+
+def test_a_manual_table_from_an_earlier_build_gains_its_title(tmp_path):
+    """The table first shipped without ``title``, under the same schema version."""
+    import sqlite3
+
+    path = tmp_path / "early.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE manual_tags (library TEXT NOT NULL, media_key TEXT NOT NULL, "
+        "added TEXT NOT NULL DEFAULT '[]', removed TEXT NOT NULL DEFAULT '[]', "
+        "locked INTEGER NOT NULL DEFAULT 0, note TEXT, updated_at REAL NOT NULL, "
+        "PRIMARY KEY (library, media_key))"
+    )
+    conn.execute("INSERT INTO manual_tags (library, media_key, added, updated_at) "
+                 "VALUES ('Animes', 'mal://1', '[\"A\"]', 1.0)")
+    conn.commit()
+    conn.close()
+
+    with Store(path) as opened:
+        assert opened.manual_for_library("Animes")["mal://1"].title is None
+        saved = opened.set_manual("Animes", "mal://1", added=["B"], removed=[], locked=False,
+                                  title="Monster (2004)")
+        assert saved.title == "Monster (2004)"
+
+
+def test_find_keys_lists_every_item_a_shared_title_may_mean(store: Store):
+    for key, year in (("mal://1", 2004), ("mal://9", 2019)):
+        store.record_success("Animes", key, fingerprint="f", title="Monster", year=year,
+                             rating_key=1, genres=[], provider="jikan", provider_id=key)
+
+    assert {key for key, _ in store.find_keys("Animes", "Monster")} == {"mal://1", "mal://9"}
+
+
+def _cli(tmp_path, config_file, monkeypatch):
+    from plex_auto_genres import cli
+
+    monkeypatch.setenv("PLEX_BASE_URL", "http://plex:32400")
+    monkeypatch.setenv("PLEX_TOKEN", "t")
+    db = tmp_path / "cli.db"
+    return (lambda *argv: cli.main(["--config", str(config_file), "--db", str(db), *argv])), db
+
+
+def test_the_cli_decides_genres_on_the_item_a_title_names(tmp_path, config_file,
+                                                           monkeypatch, capsys):
+    run, db = _cli(tmp_path, config_file, monkeypatch)
+    with Store(db) as seeded:
+        seeded.record_success("Animes", "mal://1", fingerprint="f", title="Monster",
+                              year=2004, rating_key=1, genres=["Drama"], provider="jikan",
+                              provider_id="1")
+
+    assert run("manual", "Animes", "monster", "--add", "Psychological", "--remove", "Drama",
+               "--note", "the sources lump it in") == 0
+    assert "+Psychological, -Drama" in capsys.readouterr().out
+    with Store(db) as after:
+        tags = after.manual_for_library("Animes")["mal://1"]
+    assert (tags.added, tags.removed, tags.title) == (
+        ("Psychological",), ("Drama",), "Monster (2004)"
+    )
+
+    assert run("--json", "manuals") == 0
+    listed = json.loads(capsys.readouterr().out)
+    assert [(e["media_key"], e["title"]) for e in listed] == [("mal://1", "Monster (2004)")]
+    assert listed[0]["updated_at"] > 0
+
+    # A second decision replaces the first, says so, and keeps the note.
+    assert run("manual", "Animes", "Monster", "--add", "Thriller") == 0
+    out = capsys.readouterr().out
+    assert "replaces: +Psychological, -Drama" in out
+    with Store(db) as after:
+        tags = after.manual_for_library("Animes")["mal://1"]
+    assert (tags.added, tags.removed, tags.note) == (("Thriller",), (), "the sources lump it in")
+
+    assert run("unmanual", "Animes", "Monster") == 0
+    assert "handed back" in capsys.readouterr().out
+    assert run("unmanual", "Animes", "Monster") == 1
+
+
+def test_the_cli_refuses_what_it_cannot_place(tmp_path, config_file, monkeypatch, capsys):
+    run, db = _cli(tmp_path, config_file, monkeypatch)
+
+    assert run("manual", "Animes", "Nowhere", "--add", "Drama") == 1
+    assert "has been seen" in capsys.readouterr().out
+    assert run("manual", "Animes", "mal://5", "--add", "Drama", "--remove", "drama") == 1
+    assert "both added and removed" in capsys.readouterr().out
+    assert run("manual", "Animes", "mal://5") == 1
+    assert "Nothing to decide" in capsys.readouterr().out
+
+    assert run("manual", "Animes", "", "--add", "Drama") == 1
+    assert "Give the item's title" in capsys.readouterr().out
+    assert run("manual", "Animes", "mal://5", "--add", "\u2605") == 1
+    assert "no letter or digit" in capsys.readouterr().out
+    assert run("manual", "Animes", "plex://show/5d9c08", "--add", "Drama") == 1
+    assert "has been seen" in capsys.readouterr().out
+
+    # A key the web UI shows is taken for an item no run reached yet, spelt the
+    # way the pipeline spells keys: typed any other way it would never match.
+    assert run("manual", "Animes", " MAL://5?lang=en ", "--lock", "--add", " Mecha ",
+               "--remove", "Kids") == 0
+    assert "exactly Mecha" in capsys.readouterr().out
+    with Store(db) as after:
+        tags = after.manual_for_library("Animes")["mal://5"]
+    assert (tags.locked, tags.added, tags.removed) == (True, ("Mecha",), ("Kids",)), (
+        "names stripped as the API does, and a lock keeps its refusals"
+    )

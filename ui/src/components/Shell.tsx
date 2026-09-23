@@ -7,7 +7,7 @@ const NAV = [
   { to: "/", n: "01", label: "Overview", icon: LayoutDashboard, end: true },
   { to: "/runs", n: "02", label: "Runs", icon: History },
   { to: "/libraries", n: "03", label: "Libraries", icon: Library },
-  { to: "/bindings", n: "04", label: "Bindings", icon: Link2 },
+  { to: "/bindings", n: "04", label: "Overrides", icon: Link2 },
   { to: "/config", n: "05", label: "Config", icon: Settings2 },
 ];
 

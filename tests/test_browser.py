@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 import respx
@@ -107,7 +109,7 @@ def test_states_for_library_and_forget(store: Store):
                          error="nope")
     states = store.states_for_library("Lib")
     assert states["mal://1"].status == "ok" and states["mal://2"].status == "failed"
-    assert store.providers_for_library("Lib")["mal://1"] == ("jikan", "1")
+    assert (states["mal://1"].provider, states["mal://1"].provider_id) == ("jikan", "1")
     assert store.forget("Lib", "mal://2") is True and store.forget("Lib", "mal://2") is False
     assert "mal://2" not in store.states_for_library("Lib")
 
@@ -149,7 +151,7 @@ def test_items_page_joins_match_state_and_bindings(browser):
 
     body = c.get("/api/v1/libraries/Animes/items").json()
     assert body["total"] == 3 and body["counts"] == {
-        "all": 3, "ok": 1, "failed": 1, "unprocessed": 1, "bound": 1}
+        "all": 3, "ok": 1, "failed": 1, "unprocessed": 1, "bound": 1, "manual": 0}
     by_title = {i["title"]: i for i in body["items"]}
 
     one = by_title["One"]
@@ -336,3 +338,115 @@ def test_an_item_can_pin_one_id_per_source(browser):
                         params={"library": "Animes", "media_key": "mal://2", "provider": "anidb"})
     assert dropped.status_code == 200
     assert store.get_bindings("Animes", "mal://2") == [ExternalId("mal", "19")]
+
+
+def test_genres_can_be_decided_by_hand_from_the_console(browser):
+    c, _, _ = browser
+    saved = c.put("/api/v1/manual", json={
+        "library": "Animes", "media_key": "mal://2",
+        "added": ["Mecha"], "removed": [], "locked": True, "note": "no source has it",
+        "title": "Second (2001)",
+    })
+    assert saved.status_code == 200 and saved.json()["locked"] is True
+
+    page = c.get("/api/v1/libraries/Animes/items").json()
+    assert page["counts"]["manual"] == 1
+    item = next(i for i in page["items"] if i["media_key"] == "mal://2")
+    assert item["match"] == "manual" and item["manual"]["added"] == ["Mecha"]
+
+    only = c.get("/api/v1/libraries/Animes/items", params={"status": "manual"}).json()
+    assert [i["media_key"] for i in only["items"]] == ["mal://2"]
+    listed = c.get("/api/v1/manual").json()
+    assert [(e["media_key"], e["title"]) for e in listed] == [("mal://2", "Second (2001)")]
+
+
+def test_an_override_that_decides_nothing_is_removed(browser):
+    c, _, store = browser
+    c.put("/api/v1/manual", json={"library": "Animes", "media_key": "mal://2",
+                                  "added": ["Mecha"], "locked": False})
+    emptied = c.put("/api/v1/manual", json={"library": "Animes", "media_key": "mal://2",
+                                            "added": [], "removed": [], "locked": False})
+    assert emptied.status_code == 200 and emptied.json() is None
+    assert store.manual_for_library("Animes") == {}
+
+
+def test_a_name_both_added_and_removed_is_refused(browser):
+    c, _, _ = browser
+    refused = c.put("/api/v1/manual", json={"library": "Animes", "media_key": "mal://2",
+                                            "added": ["Sci-Fi"], "removed": ["sci fi"]})
+    assert refused.status_code == 422
+    assert "both added and removed" in json.dumps(refused.json())
+
+
+def test_removing_an_override_hands_the_item_back(browser):
+    c, _, store = browser
+    c.put("/api/v1/manual", json={"library": "Animes", "media_key": "mal://2",
+                                  "added": ["Mecha"]})
+    params = {"library": "Animes", "media_key": "mal://2"}
+    assert c.request("DELETE", "/api/v1/manual", params=params).status_code == 200
+    assert c.request("DELETE", "/api/v1/manual", params=params).status_code == 404
+    assert store.manual_for_library("Animes") == {}
+
+
+@pytest.fixture
+def collection_prefix(monkeypatch):
+    """Set before the app loads its config; list it ahead of ``browser``."""
+    monkeypatch.setenv("PLEX_COLLECTION_PREFIX", "PAG-")
+
+
+def test_a_name_with_nothing_to_match_is_refused_not_dropped(browser):
+    """Dropped quietly, a lock of "\u2605" became an empty lock that clears the item."""
+    c, _, store = browser
+    refused = c.put("/api/v1/manual", json={"library": "Animes", "media_key": "mal://2",
+                                            "added": ["\u2605"], "locked": True})
+    assert refused.status_code == 422
+    assert "no letter or digit" in json.dumps(refused.json())
+    assert store.manual_for_library("Animes") == {}
+
+
+def test_a_lock_keeps_its_refusals(browser):
+    """A collections lock never clears, so its refusals are how one comes off."""
+    c, _, _ = browser
+    saved = c.put("/api/v1/manual", json={"library": "Animes", "media_key": "mal://2",
+                                          "added": ["Mecha"], "removed": ["Kids"],
+                                          "locked": True})
+    assert saved.status_code == 200 and saved.json()["removed"] == ["Kids"]
+
+
+def test_a_clash_through_the_prefix_is_refused_in_words(collection_prefix, browser):
+    c, _, _ = browser
+    refused = c.put("/api/v1/manual", json={"library": "Animes", "media_key": "mal://2",
+                                            "added": ["PAG-Action"], "removed": ["Action"]})
+    assert refused.status_code == 422
+    assert "both added and removed" in refused.json()["detail"]
+
+
+def test_the_items_page_says_whether_a_decision_was_applied(browser, config_file):
+    from plex_auto_genres.config import load_config
+
+    c, _, store = browser
+    c.put("/api/v1/manual", json={"library": "Animes", "media_key": "mal://2",
+                                  "added": ["Mecha"], "locked": True})
+
+    def manual_of_two():
+        page = c.get("/api/v1/libraries/Animes/items").json()
+        return next(i for i in page["items"] if i["media_key"] == "mal://2")["manual"]
+
+    assert manual_of_two()["applied"] is False
+    config = load_config(config_file)
+    lock = store.manual_for_library("Animes")["mal://2"]
+    store.record_success("Animes", "mal://2", fingerprint=lock.stamp(config.fingerprint(
+        config.find("Animes"))), title="Two", year=2002, rating_key=2, genres=["Mecha"],
+        provider="manual", provider_id="", source="manual")
+    assert manual_of_two()["applied"] is True
+
+
+def test_a_handed_back_item_is_not_shown_as_set_by_hand(browser):
+    """Its last row says "manual" until the next run; there is no decision now."""
+    c, _, store = browser
+    store.record_success("Animes", "mal://2", fingerprint="f", title="Two", year=2002,
+                         rating_key=2, genres=["Mecha"], provider="manual", provider_id="",
+                         source="manual")
+    page = c.get("/api/v1/libraries/Animes/items").json()
+    two = next(i for i in page["items"] if i["media_key"] == "mal://2")
+    assert two["match"] != "manual" and two["manual"] is None

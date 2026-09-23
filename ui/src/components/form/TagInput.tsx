@@ -4,7 +4,8 @@ import { useId, useRef, useState, type KeyboardEvent } from "react";
 /**
  * Chips plus a text box. Enter, comma or blur adds; Backspace on an empty box
  * removes the last chip. Case-insensitive de-duplication, since every consumer
- * matches genres that way too.
+ * matches genres that way too. `splitOnComma={false}` is for real tag names,
+ * which may hold a comma ("Love, Death & Robots"): only Enter and blur add.
  */
 export function TagInput({
   id,
@@ -13,6 +14,8 @@ export function TagInput({
   placeholder = "add…",
   suggestions,
   describedBy,
+  splitOnComma = true,
+  autoFocus = false,
 }: {
   id: string;
   value: string[];
@@ -20,13 +23,15 @@ export function TagInput({
   placeholder?: string;
   suggestions?: string[];
   describedBy?: string;
+  splitOnComma?: boolean;
+  autoFocus?: boolean;
 }) {
   const [text, setText] = useState("");
   const input = useRef<HTMLInputElement>(null);
   const listId = useId();
 
   const commit = (raw: string) => {
-    const parts = raw.split(",").map((p) => p.trim()).filter(Boolean);
+    const parts = (splitOnComma ? raw.split(",") : [raw]).map((p) => p.trim()).filter(Boolean);
     if (!parts.length) return;
     const seen = new Set(value.map((v) => v.toLowerCase()));
     const added = parts.filter((p) => !seen.has(p.toLowerCase()) && (seen.add(p.toLowerCase()), true));
@@ -35,7 +40,7 @@ export function TagInput({
   };
 
   const onKey = (e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Enter" || e.key === ",") {
+    if (e.key === "Enter" || (splitOnComma && e.key === ",")) {
       e.preventDefault();
       commit(text);
     } else if (e.key === "Backspace" && text === "" && value.length) {
@@ -73,6 +78,7 @@ export function TagInput({
         onKeyDown={onKey}
         onBlur={() => commit(text)}
         autoComplete="off"
+        data-autofocus={autoFocus || undefined}
       />
       {suggestions && (
         <datalist id={listId}>

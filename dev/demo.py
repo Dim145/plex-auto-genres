@@ -30,6 +30,7 @@ import sys
 import time
 import zlib
 from pathlib import Path
+from urllib.parse import unquote
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -119,6 +120,10 @@ class Item:
             )
             if indexed:
                 setattr(self, attr, [Tag(v) for _, v in indexed])
+            elif f"{field}[].tag.tag-" in kwargs:
+                # Only removals: an empty lock, or a refusal that left nothing.
+                gone = {unquote(n) for n in kwargs[f"{field}[].tag.tag-"].split(",")}
+                setattr(self, attr, [t for t in getattr(self, attr) if t.tag not in gone])
             if f"{field}.locked" in kwargs:
                 self._locked[field] = bool(int(kwargs[f"{field}.locked"]))
         if "titleSort.value" in kwargs:

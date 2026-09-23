@@ -25,7 +25,15 @@ from .config import (
 from .doctor import DoctorReport, run_doctor
 from .errors import ConfigError, PagError, PlexConnectionError
 from .migration import legacy_logs_dir, migrate_install
-from .models import MediaType, RunReport
+from .models import (
+    KNOWN_GUID_SCHEMES,
+    ExternalId,
+    ManualTags,
+    MediaType,
+    RunReport,
+    check_decision,
+    clean_names,
+)
 from .plexsvc import client as plex_client
 from .plexsvc.writer import undo_run
 from .providers import LookupRequest, bindable_schemes, build_providers
@@ -67,6 +75,32 @@ def _add_binding_parsers(sub) -> None:
 
     bindings = sub.add_parser("bindings", help="List manual bindings.")
     bindings.add_argument("--library")
+
+
+def _add_manual_parsers(sub) -> None:
+    """Genres decided by hand, which outrank the sources until handed back."""
+    manual = sub.add_parser(
+        "manual", help="Decide an item's genres (or collections) by hand, replacing any "
+                       "earlier decision on it.")
+    manual.add_argument("library")
+    manual.add_argument("title", help="Title as Plex shows it (add the year if two share it), "
+                                      "or the item's key, e.g. tmdb://1234.")
+    manual.add_argument("--add", action="append", default=[], metavar="GENRE",
+                        help="Always write this one. Repeat for several.")
+    manual.add_argument("--remove", action="append", default=[], metavar="GENRE",
+                        help="Never write this one, whatever the sources say.")
+    manual.add_argument("--lock", action="store_true",
+                        help="Stop asking the sources: genres become exactly --add; "
+                             "collections get --add and lose --remove.")
+    manual.add_argument("--note", help="Why, for whoever reads the list later. Kept from "
+                                       "the earlier decision unless given; \"\" clears it.")
+
+    unmanual = sub.add_parser("unmanual", help="Hand an item's genres back to the sources.")
+    unmanual.add_argument("library")
+    unmanual.add_argument("title")
+
+    manuals = sub.add_parser("manuals", help="List the items whose genres are decided by hand.")
+    manuals.add_argument("--library")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -114,6 +148,7 @@ def build_parser() -> argparse.ArgumentParser:
     query.add_argument("--keywords", action="store_true", help="TMDB: fetch keywords, not genres.")
 
     _add_binding_parsers(sub)
+    _add_manual_parsers(sub)
 
     undo = sub.add_parser("undo", help="Restore the tags a run overwrote.")
     undo.add_argument("run_id")
@@ -369,6 +404,129 @@ def cmd_unbind(args, config: AppConfig, store: Store, style: Style) -> int:
     which = f" for {args.provider}" if args.provider else ""
     print(style.yellow(f"No binding{which} on {args.title!r} in {library!r}."))
     return 1
+
+
+def cmd_manual(args, config: AppConfig, store: Store, style: Style, as_json: bool) -> int:
+    """Decide an item's genres by hand, hand them back, or list the decisions."""
+    if args.command == "manuals":
+        return _list_manual(store, config, _library_name(config, args.library)
+                            if args.library else None, style, as_json)
+    library = _library_name(config, args.library)
+    entry = config.find(library)
+    noun = _noun(config, library)
+    if args.command == "unmanual":
+        decided = store.manual_for_library(library)
+        found = _find_item(store, library, args.title, style, within=set(decided))
+        if found is None:
+            return 1
+        key, title = found
+        store.delete_manual(library, key)
+        print(f"{style.green('handed back')} {style.bold(title)} in {library}: "
+              f"the sources decide its {noun} again from the next run")
+        if noun == "collections" or (entry is not None and not entry.clear_genres):
+            print(style.dim("  This library merges, so names the decision added stay on the "
+                            "item; refuse them with --remove first to take them off."))
+        return 0
+
+    try:
+        added, removed = clean_names(args.add), clean_names(args.remove)
+        check_decision(added, removed, config.plex.collection_prefix)
+    except ValueError as exc:
+        print(style.red(f"{exc}."))
+        return 1
+    if not (added or removed or args.lock):
+        print(style.yellow("Nothing to decide: give --add, --remove or --lock."))
+        return 1
+    found = _find_item(store, library, args.title, style)
+    if found is None:
+        return 1
+    key, title = found
+    before = store.manual_for_library(library).get(key)
+    note = args.note if args.note is not None else (before.note if before else None)
+    store.set_manual(library, key, added=added, removed=removed, locked=args.lock,
+                     note=note or None, title=title if title != key else None)
+    after = ManualTags(tuple(added), tuple(removed), args.lock)
+    print(f"{style.green('decided')} {style.bold(title)} in {library}: "
+          f"{_describe_manual(after, noun)}")
+    if before is not None and (before.added, before.removed, before.locked) != (
+        after.added, after.removed, after.locked
+    ):
+        print(style.dim(f"  replaces: {_describe_manual(before, noun)}"))
+    print(style.dim("  The next run applies this."))
+    return 0
+
+
+def _find_item(
+    store: Store, library: str, text: str, style: Style, *, within: set[str] | None = None
+) -> tuple[str, str] | None:
+    """The ``(media_key, title)`` a typed title or key names, or None once said why.
+
+    Most items are keyed by a GUID, so a bare title stored as the key would
+    match nothing and be ignored without a word; it is looked up instead.
+    """
+    if not text.strip():
+        print(style.yellow("Give the item's title, or its key as the web UI shows it."))
+        return None
+    found = store.find_keys(library, text)
+    if within is not None:
+        found = [(key, title) for key, title in found if key in within]
+    if len(found) == 1:
+        return found[0]
+    if found:
+        print(style.yellow(f"{text!r} could be {len(found)} items in {library}; "
+                           "give the key of the one you mean:"))
+        for key, title in found:
+            print(f"  {key:30} {title}")
+        return None
+    guid = ExternalId.parse(text.strip())
+    if within is None and guid is not None and guid.scheme in KNOWN_GUID_SCHEMES:
+        # A key the web UI shows, for an item no run has reached yet. Spelt the
+        # way the pipeline spells keys, or it would never be found.
+        print(style.dim(f"  {guid} has not been seen in a run yet; this applies once an "
+                        "item keyed that way turns up."))
+        return str(guid), str(guid)
+    if within is not None:
+        print(style.yellow(f"No genres decided by hand on {text!r} in {library!r}."))
+    else:
+        print(style.yellow(
+            f"No item called {text!r} has been seen in {library!r} yet. Run the library "
+            "once, or give the item's key as the web UI shows it (e.g. tmdb://1234)."
+        ))
+    return None
+
+
+def _noun(config: AppConfig, library: str) -> str:
+    """What a library's decisions are about: its genres, or its collections."""
+    entry = config.find(library)
+    return "collections" if entry is not None and not entry.use_genres else "genres"
+
+
+def _describe_manual(tags: ManualTags, noun: str = "genres") -> str:
+    """One line for a decision, in the terms the console uses."""
+    if tags.locked and noun == "genres":
+        return f"exactly {', '.join(tags.added)}" if tags.added else "no genres at all"
+    parts = [f"+{a}" for a in tags.added] + [f"-{r}" for r in tags.removed]
+    shown = ", ".join(parts) or "nothing added"
+    return f"sources not asked; {shown}" if tags.locked else shown
+
+
+def _list_manual(
+    store: Store, config: AppConfig, library: str | None, style: Style, as_json: bool
+) -> int:
+    entries = store.list_manual(library)
+    if as_json:
+        print(json.dumps([
+            {"library": lib, "media_key": key, **tags.as_dict()} for lib, key, tags in entries
+        ], indent=2, ensure_ascii=False))
+        return 0
+    if not entries:
+        print(style.dim("No genres decided by hand."))
+        return 0
+    for lib, key, tags in entries:
+        note = f"  {style.dim(tags.note)}" if tags.note else ""
+        name = f"{tags.title} {style.dim(key)}" if tags.title else key
+        print(f"{lib:20} {name}  {_describe_manual(tags, _noun(config, lib))}{note}")
+    return 0
 
 
 def cmd_bindings(args, config: AppConfig, store: Store, style: Style, as_json: bool) -> int:
@@ -644,6 +802,8 @@ def _dispatch(args, store: Store, style: Style) -> int:
         if args.command == "unbind":
             return cmd_unbind(args, config, store, style)
         return cmd_bindings(args, config, store, style, args.json)
+    if args.command in ("manual", "unmanual", "manuals"):
+        return cmd_manual(args, load_config(args.config, missing_ok=True), store, style, args.json)
     if args.command == "runs":
         return cmd_runs(args, store, style, args.json)
     if args.command == "failures":
