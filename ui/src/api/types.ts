@@ -327,6 +327,12 @@ export interface ItemView {
   current_collections: string[];
 }
 
+/** One item's tags in full: the items page shows only the first few. */
+export interface ItemTags {
+  genres: string[];
+  collections: string[];
+}
+
 export type ItemStatusFilter = "all" | "ok" | "failed" | "unprocessed" | "bound" | "manual";
 
 export interface ItemsPage {

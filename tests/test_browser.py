@@ -468,3 +468,17 @@ def test_bindings_list_under_the_name_the_runs_cached(browser):
                                      "provider": "mal", "provider_id": "70"})
     listed = {b["media_key"]: b["title"] for b in c.get("/api/v1/bindings").json()}
     assert listed == {"mal://2": "Two (2002)", "mal://7": None}, "no run has seen mal://7"
+
+
+def test_an_items_tags_are_read_in_full_for_the_dialog(browser):
+    """The listing behind the items page shows only the first few tags of an
+    item; a list fixed from it would have dropped the ones nobody saw."""
+    from .conftest import FakeTag
+
+    c, server, _ = browser
+    one = server._section.all()[0]
+    one.genres = [FakeTag(g) for g in ("Drama", "Kids", "Mecha")]
+
+    body = c.get(f"/api/v1/libraries/Animes/items/{one.ratingKey}/tags").json()
+    assert body == {"genres": ["Drama", "Kids", "Mecha"], "collections": []}
+    assert c.get("/api/v1/libraries/Nowhere/items/1/tags").status_code == 404

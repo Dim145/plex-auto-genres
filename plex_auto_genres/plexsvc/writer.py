@@ -27,6 +27,7 @@ from urllib.parse import quote
 
 from ..models import MediaItem, TagField, bare_name, fold
 from ..store import Store
+from .client import read_all_tags
 
 log = logging.getLogger(__name__)
 
@@ -148,7 +149,13 @@ class PlexWriter:
         remove: tuple[str, ...] | list[str] = (),
         extra: tuple[str, ...] | list[str] = (),
     ) -> WriteOutcome:
-        """Make ``field`` hold the right tags, in a single Plex request."""
+        """Make ``field`` hold the right tags, in a single Plex request.
+
+        A plan that takes tags off is made from the item's full tag list: the
+        library listing it came from shows only the first few.
+        """
+        if clear or remove or extra:
+            read_all_tags(item)
         current = list(item.current_tags(field))
         desired = plan_tags(
             current, incoming, clear=clear, prefix=prefix, remove=remove, extra=extra

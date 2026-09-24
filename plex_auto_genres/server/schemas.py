@@ -307,6 +307,13 @@ class ItemView(BaseModel):
     current_collections: list[str] = Field(default_factory=list)
 
 
+class ItemTags(BaseModel):
+    """One item's tags in full, as its own Plex page has them."""
+
+    genres: list[str] = Field(default_factory=list)
+    collections: list[str] = Field(default_factory=list)
+
+
 class ItemsPage(BaseModel):
     """A page of a library's items."""
 

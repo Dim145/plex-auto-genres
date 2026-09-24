@@ -1,6 +1,6 @@
 import { Undo2 } from "lucide-react";
 import { useId, useMemo, useState, type FormEvent } from "react";
-import { useDeleteManual, useSetManual } from "../api/client";
+import { useDeleteManual, useItemTags, useSetManual } from "../api/client";
 import type { ItemView } from "../api/types";
 import { foldName, tagKey, uniqueBy } from "../lib/tags";
 import { describedBy, Field } from "./form/Field";
@@ -87,7 +87,13 @@ export function ManualTagsEditor({
   // Genres can be fixed as a whole list. Collections are never cleared, so a
   // lock there keeps the same two lists and only stops asking the sources.
   const exactList = field === "genres";
-  const current = field === "genres" ? item.current_genres : item.current_collections;
+  // The items page came from Plex's library listing, which shows only the
+  // first few tags of an item; the item's own page has them all. A list
+  // fixed from the listing would have dropped the ones nobody saw.
+  const all = useItemTags(library, item.rating_key);
+  const listed = field === "genres" ? item.current_genres : item.current_collections;
+  const current = all.data ? (field === "genres" ? all.data.genres : all.data.collections) : listed;
+  const reading = all.isPending;
   const key = (name: string) => tagKey(name, prefix);
   const has = (list: string[], name: string) => list.some((x) => key(x) === key(name));
   const without = (list: string[], name: string) => list.filter((x) => key(x) !== key(name));
@@ -191,7 +197,11 @@ export function ManualTagsEditor({
 
         <div>
           <div className="label">In Plex now</div>
-          {current.length ? (
+          {reading && <p className="faint">Reading all of its {field} from Plex…</p>}
+          {all.isError && (
+            <p className="tone-amber">Plex did not return the item's full list, so some of its {field} may be missing here.</p>
+          )}
+          {reading ? null : current.length ? (
             <div className="manual__chips" role="group" aria-label={`${field} in Plex now`}>
               {current.map((name) => {
                 const off = fixing ? !has(exact, name) : has(drops, name);
@@ -257,7 +267,7 @@ export function ManualTagsEditor({
           <button type="button" className="button button--ghost" onClick={onClose} disabled={busy}>
             Cancel
           </button>
-          <button type="submit" className="button" disabled={busy || Boolean(problem) || (decidesNothing && !saved)}>
+          <button type="submit" className="button" disabled={busy || reading || Boolean(problem) || (decidesNothing && !saved)}>
             {save.isPending ? "Saving…" : "Save"}
           </button>
         </div>

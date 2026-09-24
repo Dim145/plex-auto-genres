@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import pytest
 
-from plex_auto_genres.models import TagField
+from plex_auto_genres.models import MediaItem, TagField
 from plex_auto_genres.plexsvc.writer import PlexWriter, build_tag_edits, plan_tags
 from plex_auto_genres.store import Store
 
-from .conftest import FakePlexItem
+from .conftest import FakePlexItem, FakeTag
 
 
 # -- bug #1: only the last genre of the loop survived ----------------------
@@ -230,3 +230,59 @@ def test_decisions_match_a_tag_with_the_prefix_or_without_it():
 def test_a_refusal_beats_an_answer_and_an_addition_alike():
     assert plan_tags(current=[], incoming=["Drama", "Kids"], clear=True, prefix="PAG-",
                      remove=["PAG-Kids"], extra=["kids"]) == ["PAG-Drama"]
+
+
+class _Listed(FakePlexItem):
+    """A Plex item as a library listing hands it over: only some of its tags."""
+
+    def __init__(self, shown, full):
+        super().__init__(1, "Anime", 2001, genres=shown)
+        self._full, self.reloads = list(full), 0
+
+    def isPartialObject(self):
+        return self.reloads == 0
+
+    def reload(self):
+        self.reloads += 1
+        self.genres = [FakeTag(g) for g in self._full]
+        return self
+
+
+def _listed_item(shown, full) -> MediaItem:
+    handle = _Listed(shown, full)
+    return MediaItem(rating_key=1, title="Anime", year=2001, guids=[],
+                     current_genres=list(shown), handle=handle)
+
+
+def test_replacing_takes_off_the_tags_a_listing_did_not_show(store: Store):
+    """Plex lists two genres of four; clearGenres removed only those two, and
+    every older tag past the cut -- a renamed one, an ignored one -- stayed."""
+    item = _listed_item(["Drama", "otaku culture"], ["Drama", "otaku culture", "Kids", "sister"])
+    writer = PlexWriter(store, "run", "Anime")
+
+    outcome = writer.write_tags(item, TagField.GENRE, ["Drama", "otaku", "sisters"], clear=True)
+
+    removed = item.handle.edits[-1]["genre[].tag.tag-"].split(",")
+    assert sorted(removed) == ["Kids", "otaku%20culture", "sister"]
+    assert outcome.before == ["Drama", "otaku culture", "Kids", "sister"], "the undo record too"
+
+
+def test_a_plan_that_takes_nothing_off_reads_no_more_than_the_listing(store: Store):
+    """Merging only adds, so tags past the cut cannot change the result: no
+    extra request per item for the passes that run over a whole library."""
+    item = _listed_item(["Drama"], ["Drama", "Kids"])
+    writer = PlexWriter(store, "run", "Anime")
+
+    writer.write_tags(item, TagField.GENRE, ["Action"], clear=False)
+
+    assert item.handle.reloads == 0
+
+
+def test_a_refusal_reaches_a_tag_past_the_listings_cut(store: Store):
+    item = _listed_item(["Drama"], ["Drama", "Kids"])
+    writer = PlexWriter(store, "run", "Anime")
+
+    writer.write_tags(item, TagField.GENRE, ["Action"], clear=False, remove=["kids"])
+
+    assert item.handle.last_tags == ["Drama", "Action"]
+    assert item.handle.edits[-1]["genre[].tag.tag-"] == "Kids"

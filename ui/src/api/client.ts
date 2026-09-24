@@ -11,6 +11,7 @@ import type {
   DoctorReport,
   Health,
   ItemStatusFilter,
+  ItemTags,
   ItemsPage,
   JobEvent,
   JobProgress,
@@ -130,6 +131,8 @@ export const api = {
       status: query.status,
       refresh: query.refresh ? "1" : undefined,
     }),
+  itemTags: (library: string, ratingKey: number) =>
+    get<ItemTags>(`/api/v1/libraries/${encodeURIComponent(library)}/items/${ratingKey}/tags`),
   forgetItem: (library: string, mediaKey: string) =>
     send<{ forgotten: boolean }>("POST", `/api/v1/libraries/${encodeURIComponent(library)}/items/forget?media_key=${encodeURIComponent(mediaKey)}`, undefined),
   refreshLibrary: (library: string) =>
@@ -197,6 +200,15 @@ export const useRun = (id: string) =>
 
 export const useBindings = (library?: string) =>
   useQuery({ queryKey: ["bindings", library ?? ""], queryFn: () => api.bindings(library) });
+
+/** Read fresh each time a dialog opens: a run may have changed them since. */
+export const useItemTags = (library: string, ratingKey: number) =>
+  useQuery({
+    queryKey: ["item-tags", library, ratingKey],
+    queryFn: () => api.itemTags(library, ratingKey),
+    staleTime: 0,
+    retry: false,
+  });
 
 export const useManualTags = (library?: string) =>
   useQuery({ queryKey: ["manual", library ?? ""], queryFn: () => api.manual(library) });

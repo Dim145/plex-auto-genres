@@ -132,20 +132,53 @@ def iter_library(server: PlexServer, library: str, *, page_size: int = 200) -> l
         if primary is not None and primary not in guids:
             guids.append(primary)
 
+        genres, collections, locked = _tags_of(raw)
         items.append(
             MediaItem(
                 rating_key=int(raw.ratingKey),
                 title=raw.title,
                 year=getattr(raw, "year", None),
                 guids=guids,
-                current_genres=[t.tag for t in (getattr(raw, "genres", None) or [])],
-                current_collections=[t.tag for t in (getattr(raw, "collections", None) or [])],
-                locked_fields={
-                    f.name for f in (getattr(raw, "fields", None) or [])
-                    if getattr(f, "locked", False) and getattr(f, "name", None)
-                },
+                current_genres=genres,
+                current_collections=collections,
+                locked_fields=locked,
                 thumb=getattr(raw, "thumb", None) or None,
                 handle=raw,
             )
         )
     return items
+
+
+def _tags_of(raw) -> tuple[list[str], list[str], set[str]]:
+    """A Plex object's genres, collections and locked fields."""
+    return (
+        [t.tag for t in (getattr(raw, "genres", None) or [])],
+        [t.tag for t in (getattr(raw, "collections", None) or [])],
+        {
+            f.name for f in (getattr(raw, "fields", None) or [])
+            if getattr(f, "locked", False) and getattr(f, "name", None)
+        },
+    )
+
+
+def read_all_tags(item: MediaItem) -> None:
+    """Replace an item's tags with the full set when it came from a listing.
+
+    A library listing returns only the first few tags of each kind -- two
+    genres of four is typical -- and a write planned from that left every tag
+    past the cut on the item: exactly the ones clearGenres, a rename or a
+    refusal is there to take off, and it could call an item unchanged that
+    was not. This costs a GET, so the writer only asks for it when a plan
+    takes tags off.
+    """
+    partial = getattr(item.handle, "isPartialObject", None)
+    if partial is None or not partial():
+        return
+    item.handle.reload()  # type: ignore[attr-defined]
+    item.current_genres, item.current_collections, item.locked_fields = _tags_of(item.handle)
+
+
+def item_tags(server: PlexServer, rating_key: int) -> tuple[list[str], list[str]]:
+    """One item's full genres and collections, read from its own page."""
+    genres, collections, _ = _tags_of(server.fetchItem(int(rating_key)))
+    return genres, collections

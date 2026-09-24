@@ -19,6 +19,7 @@ from ..errors import ConfigError, PlexConnectionError, ProviderError
 from ..jobs import Job, JobConflict, JobError, JobManager, JobOptions
 from ..models import ManualTags, MediaItem, MediaType, check_decision, stamp_pins
 from ..pipeline import media_key
+from ..plexsvc import client as plex_client
 from ..plexsvc.writer import undo_run
 from ..providers import LookupRequest, bindable_schemes, build_providers
 from ..scheduler import next_fires, validate_cron
@@ -579,6 +580,29 @@ async def forget_item(
     if entry is None:
         raise HTTPException(status_code=404, detail=f"Library {name!r} is not configured.")
     return {"forgotten": state.store.forget(entry.library, media_key_)}
+
+
+@router.get("/libraries/{name}/items/{rating_key}/tags", response_model=schemas.ItemTags)
+async def item_tags(request: Request, name: str, rating_key: int) -> schemas.ItemTags:
+    """One item's genres and collections in full.
+
+    The items page reads the library listing, which shows only the first few
+    tags of each item: enough to browse by, not to decide an item's tags from.
+    """
+    state = _state(request)
+    config = _config_or_503(state)
+    if config.find(name) is None:
+        raise HTTPException(status_code=404, detail=f"Library {name!r} is not configured.")
+    try:
+        server = await state.plex()
+        genres, collections = await asyncio.to_thread(plex_client.item_tags, server, rating_key)
+    except PlexConnectionError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:  # plexapi's NotFound, or Plex refusing the read
+        raise HTTPException(
+            status_code=502, detail=f"Plex could not read item {rating_key}: {exc}"
+        ) from exc
+    return schemas.ItemTags(genres=genres, collections=collections)
 
 
 # -- candidate search ----------------------------------------------------------

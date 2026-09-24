@@ -814,6 +814,24 @@ Around it:
 * Pins the old `bind` left under a typed title are not re-homed by guesswork: `doctor`
   lists them and `bindings` marks them, with the way out.
 
+### Tags past the listing's cut — done
+
+Reported: rename and ignore rules seemed to do nothing. The names they cover stayed in
+Plex, with "Replace existing genres" on. The rules were fine and the write was not.
+Plex's library listing returns only the first few tags of each item (two genres of four
+is typical), and every write was planned from that listing. With `clearGenres` the
+removal list named only the tags it showed, so every older tag past the cut stayed —
+exactly the ones a rename or an ignore rule exists to take off — and an item whose
+visible tags already matched was reported unchanged.
+
+A write that takes tags off (`clearGenres`, a refusal, a name added by hand) now reads
+the item's own page first. One that only adds (merging, rating collections) does not
+need to: Plex appends, so tags past the cut cannot change its result, and those passes
+run over a whole library. The genres dialog reads the item in full for the same reason:
+a list fixed from the listing would have dropped the tags nobody saw. Items written by
+an earlier version keep their hidden tags until they are written again; a forced run
+of the library cleans them.
+
 ### Next
 
 Decide where secrets should live if they are ever to be edited from the UI — the
