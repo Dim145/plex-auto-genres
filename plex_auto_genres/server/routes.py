@@ -17,7 +17,7 @@ from ..config import DEFAULT_PROVIDERS, config_json_schema, validate_document, w
 from ..doctor import run_doctor
 from ..errors import ConfigError, PlexConnectionError, ProviderError
 from ..jobs import Job, JobConflict, JobError, JobManager, JobOptions
-from ..models import ManualTags, MediaItem, MediaType, check_decision
+from ..models import ManualTags, MediaItem, MediaType, check_decision, stamp_pins
 from ..pipeline import media_key
 from ..plexsvc.writer import undo_run
 from ..providers import LookupRequest, bindable_schemes, build_providers
@@ -533,7 +533,9 @@ async def library_items(
             bindings=bound.get(key, []),
             manual=_manual_view(
                 manual,
-                applied=cached is not None and cached.fingerprint == manual.stamp(settings_fp),
+                applied=cached is not None and cached.fingerprint == manual.stamp(stamp_pins(
+                    settings_fp, (f"{b.provider}://{b.provider_id}" for b in bound.get(key, []))
+                )),
             ) if manual is not None else None,
             state=schemas.ItemState(
                 status=cached.status,  # type: ignore[arg-type]

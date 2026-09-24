@@ -742,7 +742,7 @@ What the obvious version gets wrong, each with a test:
   name; the CLI resolves a typed title against the cache and the overrides, lists the
   candidates when two items share it, refuses a blank one (it matched every untitled
   decision) and a name it has never seen, and spells a typed key the way the pipeline
-  does. `bind` has the same flaw and is left for its own change.
+  does. `bind` had the same flaw; see "Bindings by title" below.
 
 Deliberately not done: treating an edit made directly in Plex as an override. Plex's
 own field lock cannot tell a person's edit from ours — the writer locks every field it
@@ -780,6 +780,39 @@ listed above with their fixes. The rest:
   saved, so reopening it straight away no longer starts from the old one;
 * the demo's fake Plex ignored an edit that only removes tags, so an empty lock looked
   like it did nothing there.
+
+### Bindings by title — done
+
+`bind` stored whatever was typed as the item's key, while the pipeline looks pins up by
+the GUID key Plex gives nearly every item. `bind Lib 'Some Title' tmdb 123` was
+accepted, printed "bound", and never applied — and `failures` suggested exactly that
+command line, with a TMDB id even for a library that cannot read one.
+
+`bind` and `unbind` now resolve a title the way `manual` does (`Store.find_keys` and the
+CLI's `_find_item`). The first cut of this kept the item's name on the pin, since
+binding deleted the cached row where names live; its review found a dozen ways that
+went wrong, and nearly all came from that delete. So pins went the way decisions
+already had: they are stamped into the item's fingerprint (`stamp_pins`, the part the
+ratings pass compares, since a pin changes which record a score is from) and the
+cached row stays. That also closes the race a decision had: a pin saved while a run is
+under way is no longer lost when the run records the item a moment later.
+
+Around it:
+
+* An exact key wins over a title that spells it — a GUID-less item's key *is* its
+  title — and `unbind` takes a key typed exactly, even one no lookup finds, which is
+  how a pin the old `bind` filed under a title comes off. A typed GUID is spelt the
+  way the pipeline spells keys before it is looked up.
+* A title known only from v1's progress files is refused for `bind` and `manual`: that
+  import is copied into every library of the type, under keys no run may use.
+* Adopting a v1 row onto a GUID key, which carries whatever was filed with it, now needs
+  evidence: a name two items share proves nothing (a GUID-less item of that name is
+  one of them), the row must be a v1 import or this very Plex item's, and a dry run
+  moves nothing.
+* `forget` and `failures --retry` make rows stale instead of deleting them, so the item
+  keeps the name the next `bind` is told to use.
+* Pins the old `bind` left under a typed title are not re-homed by guesswork: `doctor`
+  lists them and `bindings` marks them, with the way out.
 
 ### Next
 

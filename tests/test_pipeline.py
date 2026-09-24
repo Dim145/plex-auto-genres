@@ -12,6 +12,7 @@ from plex_auto_genres.providers import UNHEALTHY_AFTER
 from plex_auto_genres.providers.anidb_map import MAPPING_URL
 from plex_auto_genres.providers.base import HttpTransport
 from plex_auto_genres.ratelimit import LimitSpec
+from plex_auto_genres.models import ExternalId
 from plex_auto_genres.store import Store
 
 from .conftest import FakePlexItem, FakeTag
@@ -1319,3 +1320,157 @@ async def test_a_collections_lock_can_still_refuse(store: Store):
     await Pipeline(config, store, FakeServer([handle])).tag_library(config.libraries[0])
 
     assert handle.last_tags == ["PAG-Action", "PAG-Mecha"]
+
+
+@respx.mock
+async def test_a_pin_filed_with_a_v1_row_moves_with_it_and_applies(store: Store):
+    """A pin filed under a v1 key follows the row onto the GUID key when the
+    row is adopted, and is used in that same run."""
+    pinned = respx.get("https://api.jikan.moe/v4/anime/19").mock(
+        return_value=jikan_ok(19, genres=("Psychological",))
+    )
+    handle = guid_item()                             # "Cowboy Bebop (1998)", mal://1
+    config = make_config(clearGenres=True)
+    store.record_success("Animes", "Cowboy Bebop (1998)", fingerprint=config.fingerprint(
+        config.libraries[0]), title="Cowboy Bebop", year=1998, rating_key=None,
+        genres=["Old"], provider=None, provider_id=None)          # as v1's import leaves it
+    store.set_binding("Animes", "Cowboy Bebop (1998)", "mal", "19")
+
+    await Pipeline(config, store, FakeServer([handle])).tag_library(config.libraries[0])
+
+    assert pinned.called and handle.last_tags == ["Psychological"]
+    assert [str(pin) for pin in store.get_bindings("Animes", "mal://1")] == ["mal://19"]
+
+
+
+@respx.mock
+async def test_a_pin_saved_while_a_run_is_under_way_is_applied(store: Store):
+    """Binding deleted the cached row, and the run that was going wrote it back
+    a moment later under the old fingerprint: every later run skipped the item."""
+    pinned = respx.get("https://api.jikan.moe/v4/anime/19").mock(
+        return_value=jikan_ok(19, genres=("Psychological",))
+    )
+    handle = guid_item()
+    config = make_config(clearGenres=True)
+    run = config.libraries[0]
+    store.set_binding("Animes", "mal://1", "mal", "19")
+    store.record_success("Animes", "mal://1", fingerprint=config.fingerprint(run),
+                         title="Cowboy Bebop", year=1998, rating_key=1, genres=["Action"],
+                         provider="jikan", provider_id="1")
+
+    report = await Pipeline(config, store, FakeServer([handle])).tag_library(run)
+
+    assert report.skipped == 0 and pinned.called and handle.last_tags == ["Psychological"]
+
+
+@respx.mock
+async def test_a_pin_removed_during_a_run_goes_back_to_the_guid(store: Store):
+    from plex_auto_genres.models import stamp_pins
+
+    guid = respx.get("https://api.jikan.moe/v4/anime/1").mock(
+        return_value=jikan_ok(1, genres=("Action",))
+    )
+    handle = guid_item()
+    config = make_config(clearGenres=True)
+    run = config.libraries[0]
+    store.set_binding("Animes", "mal://1", "mal", "19")
+    store.record_success("Animes", "mal://1", fingerprint=stamp_pins(
+        config.fingerprint(run), ["mal://19"]), title="Cowboy Bebop", year=1998, rating_key=1,
+        genres=["Psychological"], provider="jikan", provider_id="19", source="binding")
+    store.delete_binding("Animes", "mal://1")
+
+    await Pipeline(config, store, FakeServer([handle])).tag_library(run)
+
+    assert guid.called and handle.last_tags == ["Action"]
+
+
+@respx.mock
+async def test_an_items_own_key_is_never_taken_for_v1_data(store: Store):
+    """A GUID-less item is keyed by "Title (Year)", the same string a matched
+    item of that name has as its identifier: its pin must stay its own."""
+    respx.get("https://api.jikan.moe/v4/anime/1").mock(return_value=jikan_ok(1, genres=("Drama",)))
+    respx.get("https://api.jikan.moe/v4/anime/19").mock(
+        return_value=jikan_ok(19, genres=("Psychological",))
+    )
+    matched = guid_item(rating_key=1, title="Monster", year=2004)
+    loose = FakePlexItem(2, "Monster", 2004)                   # no GUID: keyed by its name
+    loose.guids = []
+    config = make_config(clearGenres=True)
+    store.record_success("Animes", "Monster (2004)", fingerprint="old", title="Monster",
+                         year=2004, rating_key=2, genres=[], provider=None, provider_id=None)
+    store.set_binding("Animes", "Monster (2004)", "mal", "19")
+
+    await Pipeline(config, store, FakeServer([matched, loose])).tag_library(config.libraries[0])
+
+    assert matched.last_tags == ["Drama"] and loose.last_tags == ["Psychological"]
+    assert store.get_bindings("Animes", "mal://1") == []
+    assert store.get_bindings("Animes", "Monster (2004)") == [ExternalId("mal", "19")]
+
+
+@respx.mock
+async def test_a_name_two_items_share_adopts_nothing(store: Store):
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d+").mock(return_value=jikan_ok())
+    one, two = guid_item(1, "Monster", 2004), guid_item(2, "Monster", 2004)
+    config = make_config()
+    store.record_success("Animes", "Monster (2004)", fingerprint=config.fingerprint(
+        config.libraries[0]), title="Monster", year=2004, rating_key=None, genres=["Old"],
+        provider=None, provider_id=None)
+
+    report = await Pipeline(config, store, FakeServer([one, two])).tag_library(config.libraries[0])
+
+    assert report.written == 2, "neither item is the v1 row's, so both are resolved"
+    assert store.get_state("Animes", "Monster (2004)") is not None, "and the row stays put"
+
+
+@respx.mock
+async def test_a_dry_run_adopts_nothing(store: Store):
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d+").mock(return_value=jikan_ok())
+    handle = guid_item()
+    config = make_config()
+    store.record_success("Animes", "Cowboy Bebop (1998)", fingerprint="stale", title="Cowboy Bebop",
+                         year=1998, rating_key=None, genres=["Old"], provider=None,
+                         provider_id=None)
+
+    await Pipeline(config, store, FakeServer([handle]), dry_run=True).tag_library(
+        config.libraries[0])
+
+    assert store.get_state("Animes", "Cowboy Bebop (1998)") is not None
+    assert store.get_state("Animes", "mal://1") is None
+
+
+@respx.mock
+async def test_ratings_do_not_reuse_a_score_from_before_the_pin(store: Store):
+    """A pin changes which record the score is from."""
+    respx.get("https://api.jikan.moe/v4/anime/1").mock(return_value=jikan_ok(1, score=8.0))
+    pinned = respx.get("https://api.jikan.moe/v4/anime/19").mock(
+        return_value=jikan_ok(19, score=3.0)
+    )
+    handle = guid_item()
+    config = make_config(rateAnime=True)
+    run = config.libraries[0]
+    pipeline = Pipeline(config, store, FakeServer([handle]))
+    await pipeline.tag_library(run)
+    store.set_binding("Animes", "mal://1", "mal", "19")
+
+    await pipeline.rate_library(run)
+
+    assert pinned.called and handle.ratings[-1] == 3.0
+
+
+@respx.mock
+async def test_a_row_another_plex_item_left_is_not_adopted(store: Store):
+    """A GUID-less item that Plex no longer has left its row, and its pin,
+    under a name a new matched item now shares: they are not this one's."""
+    respx.get("https://api.jikan.moe/v4/anime/5").mock(return_value=jikan_ok(5, genres=("Drama",)))
+    matched = guid_item(rating_key=5, title="Monster", year=2004)       # mal://5
+    config = make_config(clearGenres=True)
+    store.record_success("Animes", "Monster (2004)", fingerprint=config.fingerprint(
+        config.libraries[0]), title="Monster", year=2004, rating_key=2, genres=["Old"],
+        provider="jikan", provider_id="19")
+    store.set_binding("Animes", "Monster (2004)", "mal", "19")
+
+    await Pipeline(config, store, FakeServer([matched])).tag_library(config.libraries[0])
+
+    assert matched.last_tags == ["Drama"], "resolved by its own GUID"
+    assert store.get_bindings("Animes", "mal://5") == []
+    assert store.get_bindings("Animes", "Monster (2004)") == [ExternalId("mal", "19")]

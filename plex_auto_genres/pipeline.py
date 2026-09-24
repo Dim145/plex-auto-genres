@@ -17,6 +17,7 @@ import asyncio
 import contextlib
 import logging
 import time
+from collections import Counter
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +39,7 @@ from .models import (
     RunReport,
     TagField,
     bare_name,
+    stamp_pins,
 )
 from .plexsvc import client as plex_client
 from .plexsvc.writer import PlexWriter, sort_collections, upload_posters
@@ -343,7 +345,12 @@ class Pipeline:
 
             states = self.store.states_for_library(run.library)
             manuals = self.store.manual_for_library(run.library)
-            pending = self._pending(items, run, fingerprint, states, manuals)
+            bindings = self.store.bindings_for_library(run.library)
+            pending, moved = self._pending(items, run, fingerprint, states, manuals, bindings)
+            if moved:
+                # What was filed with an adopted v1 row now sits under its GUID key.
+                manuals, bindings = (self.store.manual_for_library(run.library),
+                                     self.store.bindings_for_library(run.library))
             report.skipped = len(items) - len(pending)
             if on_begin is not None:
                 on_begin(report.run_id, len(items), len(pending))
@@ -352,7 +359,6 @@ class Pipeline:
 
             pool = build_providers(run.resolved_providers, run.type, self.config.providers)
             mapper = AniDbMapper(self.store, enabled=run.type.is_anime)
-            bindings = self.store.bindings_for_library(run.library)
             prefix = self.config.plex.collection_prefix
 
             fetch_sem = asyncio.Semaphore(self.config.providers.concurrency)
@@ -362,6 +368,7 @@ class Pipeline:
             async def handle(item: MediaItem) -> ItemOutcome:
                 key = media_key(item)
                 manual = manuals.get(key, NO_DECISION)
+                stamped = manual.stamp(stamp_pins(fingerprint, bindings.get(key, ())))
                 # A lock is the whole list, whatever the library's clearGenres
                 # says: merging would keep tags the person has already decided
                 # against. Never for collections, though: those also hold the
@@ -392,7 +399,7 @@ class Pipeline:
                     if not self.dry_run:
                         self.store.record_success(
                             run.library, key,
-                            fingerprint=manual.stamp(fingerprint), title=item.title,
+                            fingerprint=stamped, title=item.title,
                             year=item.year, rating_key=item.rating_key, genres=outcome.after,
                             provider=result.provider, provider_id=result.provider_id,
                             score=result.score, source=result.matched_by,
@@ -418,7 +425,7 @@ class Pipeline:
                     if not self.dry_run:
                         self.store.record_failure(
                             run.library, key,
-                            fingerprint=manual.stamp(fingerprint), title=item.title,
+                            fingerprint=stamped, title=item.title,
                             year=item.year,
                             rating_key=item.rating_key, error=str(exc),
                         )
@@ -431,7 +438,7 @@ class Pipeline:
                     if not self.dry_run:
                         self.store.record_failure(
                             run.library, key,
-                            fingerprint=manual.stamp(fingerprint), title=item.title,
+                            fingerprint=stamped, title=item.title,
                             year=item.year,
                             rating_key=item.rating_key, error=f"{type(exc).__name__}: {exc}",
                         )
@@ -485,36 +492,48 @@ class Pipeline:
         fingerprint: str,
         states: dict[str, CachedState],
         manuals: dict[str, ManualTags],
-    ) -> list[MediaItem]:
-        """The items the cache says still need work under these settings.
+        bindings: Bindings,
+    ) -> tuple[list[MediaItem], bool]:
+        """The items the cache says still need work under these settings, and
+        whether v1 rows were adopted (and what was filed with them moved).
 
         ``states`` is the library's whole cache, loaded in one query; the skip
-        rule itself is arithmetic. An item's decision by hand is part of its
-        fingerprint, so a cached result made under another decision is stale.
+        rule itself is arithmetic. An item's pins and decision by hand are part
+        of its fingerprint, so a result cached under others is stale.
+
         Rows imported from v1's progress files are keyed ``"Title (Year)"``;
         when an item now has a GUID key, its legacy row is adopted and moved
-        under the new key so the import counts, and a decision filed under the
-        old key moves with it (``manuals`` is updated in place).
+        under the new key so the import counts, with any pin or decision filed
+        under it. Only on evidence. A name two items share proves nothing --
+        which also covers a GUID-less item of the same name, whose key that
+        string is and which keeps what is its own. And the row must be a v1
+        import, or have been recorded for this very Plex item: one left by an
+        item since deleted is not this one's. A dry run moves nothing.
         """
         now = time.time()
+        names = Counter(item.identifier for item in items)
         promotions: dict[str, str] = {}
         pending: list[MediaItem] = []
         for item in items:
-            key = media_key(item)
+            key, legacy = media_key(item), item.identifier
             state = states.get(key)
-            if state is None and key != item.identifier:
-                state = states.get(item.identifier)
-                if state is not None:
-                    promotions[item.identifier] = key
-                    if key not in manuals and item.identifier in manuals:
-                        manuals[key] = manuals.pop(item.identifier)
-            stamped = manuals.get(key, NO_DECISION).stamp(fingerprint)
-            if Store.needs_work(state, stamped, force=self.force, now=now):
+            if state is None and legacy != key and names[legacy] == 1:
+                old = states.get(legacy)
+                if old is not None and old.rating_key in (None, item.rating_key):
+                    state = old
+                    promotions[legacy] = key
+            filed = legacy if legacy in promotions else key
+            pins = bindings.get(key) or bindings.get(filed, [])
+            manual = manuals.get(key) or manuals.get(filed, NO_DECISION)
+            if Store.needs_work(state, manual.stamp(stamp_pins(fingerprint, pins)),
+                                force=self.force, now=now):
                 pending.append(item)
-        if promotions:
-            moved = self.store.rename_media_keys(run.library, promotions)
-            log.info("%s: adopted %d v1 cache entries under their GUID keys", run.library, moved)
-        return pending
+        if not promotions or self.dry_run:
+            return pending, False
+        self.store.rename_media_keys(run.library, promotions)
+        log.info("%s: adopted %d v1 cache entries under their GUID keys",
+                 run.library, len(promotions))
+        return pending, True
 
     async def _resolve(
         self,
@@ -686,12 +705,15 @@ class Pipeline:
     def _cached_score(state: CachedState | None, fingerprint: str) -> float | None:
         """The score the tag action already fetched, if it is still current.
 
-        A decision by hand stamps the fingerprint (``base+decision``) without
-        changing where the score came from, so only the settings part counts.
+        ``fingerprint`` is the settings with the item's pins
+        (:func:`stamp_pins`): a pin changes which record the score is from. A
+        decision by hand (``+decision``) does not, so it is left out.
         """
         if state is None or state.status != "ok":
             return None
-        if state.fingerprint.split("+", 1)[0] != fingerprint:
+        if state.fingerprint != fingerprint and not state.fingerprint.startswith(
+            f"{fingerprint}+"
+        ):
             return None
         return state.score
 
@@ -727,7 +749,10 @@ class Pipeline:
 
             async def handle(item: MediaItem) -> ItemOutcome:
                 try:
-                    score = self._cached_score(states.get(media_key(item)), fingerprint)
+                    key = media_key(item)
+                    score = self._cached_score(
+                        states.get(key), stamp_pins(fingerprint, bindings.get(key, ()))
+                    )
                     if score is None:
                         async with fetch_sem:
                             result = await self._resolve(item, run, pool, mapper, bindings)

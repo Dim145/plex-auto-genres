@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import logging
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -26,13 +27,12 @@ from .doctor import DoctorReport, run_doctor
 from .errors import ConfigError, PagError, PlexConnectionError
 from .migration import legacy_logs_dir, migrate_install
 from .models import (
-    KNOWN_GUID_SCHEMES,
-    ExternalId,
     ManualTags,
     MediaType,
     RunReport,
     check_decision,
     clean_names,
+    guid_key,
 )
 from .plexsvc import client as plex_client
 from .plexsvc.writer import undo_run
@@ -57,19 +57,24 @@ DEFAULT_DB = "logs/plex-auto-genres.db"
 #: resolve is checked against its sources when the binding is set.
 BINDABLE_SCHEMES = ["tmdb", "mal", "anilist", "anidb", "tvdb", "imdb"]
 
+#: How every command that names an item takes it. A title is looked up in the
+#: cache: most items are keyed by a GUID, which nobody types.
+ITEM_HELP = ("Title as Plex shows it (add the year if two share it), "
+             "or the item's key, e.g. tmdb://1234.")
+
 
 def _add_binding_parsers(sub) -> None:
     """The three commands over manual bindings, which an item holds per source."""
     bind = sub.add_parser("bind", help="Pin a Plex item to a specific provider id.")
     bind.add_argument("library")
-    bind.add_argument("title", help="Plex title, or the cache key shown by 'failures'.")
+    bind.add_argument("title", help=ITEM_HELP)
     bind.add_argument("provider", choices=BINDABLE_SCHEMES)
     bind.add_argument("provider_id")
     bind.add_argument("--note", help="Free-text reminder of why this binding exists.")
 
     unbind = sub.add_parser("unbind", help="Remove an item's manual bindings.")
     unbind.add_argument("library")
-    unbind.add_argument("title")
+    unbind.add_argument("title", help=ITEM_HELP)
     unbind.add_argument("--provider", choices=BINDABLE_SCHEMES,
                         help="Remove just this source's id, leaving the others.")
 
@@ -83,8 +88,7 @@ def _add_manual_parsers(sub) -> None:
         "manual", help="Decide an item's genres (or collections) by hand, replacing any "
                        "earlier decision on it.")
     manual.add_argument("library")
-    manual.add_argument("title", help="Title as Plex shows it (add the year if two share it), "
-                                      "or the item's key, e.g. tmdb://1234.")
+    manual.add_argument("title", help=ITEM_HELP)
     manual.add_argument("--add", action="append", default=[], metavar="GENRE",
                         help="Always write this one. Repeat for several.")
     manual.add_argument("--remove", action="append", default=[], metavar="GENRE",
@@ -97,7 +101,7 @@ def _add_manual_parsers(sub) -> None:
 
     unmanual = sub.add_parser("unmanual", help="Hand an item's genres back to the sources.")
     unmanual.add_argument("library")
-    unmanual.add_argument("title")
+    unmanual.add_argument("title", help=ITEM_HELP)
 
     manuals = sub.add_parser("manuals", help="List the items whose genres are decided by hand.")
     manuals.add_argument("--library")
@@ -378,32 +382,41 @@ def cmd_bind(args, config: AppConfig, store: Store, style: Style) -> int:
                 f"which take: {', '.join(allowed)}."
             ))
             return 1
-    store.set_binding(library, args.title, args.provider, args.provider_id, args.note)
+    found = _find_item(store, library, args.title, style)
+    if found is None:
+        return 1
+    key, name = found
+    store.set_binding(library, key, args.provider, args.provider_id, args.note)
     print(
-        f"{style.green('bound')} {style.bold(args.title)} in {library} "
+        f"{style.green('bound')} {style.bold(name or key)} in {library} "
         f"-> {args.provider}://{args.provider_id}"
     )
-    pinned = store.get_bindings(library, args.title)
+    pinned = store.get_bindings(library, key)
     if len(pinned) > 1:
         print(style.dim(f"  now pinned on {len(pinned)} sources: "
                         f"{', '.join(str(e) for e in pinned)}"))
-    print(style.dim("  Its cache entry was cleared; the next run will use this id."))
+    print(style.dim("  The next run resolves the item through it."))
     return 0
 
 
 def cmd_unbind(args, config: AppConfig, store: Store, style: Style) -> int:
     """Remove a manual binding."""
     library = _library_name(config, args.library)
-    if store.delete_binding(library, args.title, args.provider):
-        what = f"{args.provider} id" if args.provider else "bindings"
-        print(f"{style.green('removed')} {what} for {args.title} in {library}")
-        remaining = store.get_bindings(library, args.title)
-        if remaining:
-            print(style.dim(f"  still pinned: {', '.join(str(e) for e in remaining)}"))
-        return 0
     which = f" for {args.provider}" if args.provider else ""
-    print(style.yellow(f"No binding{which} on {args.title!r} in {library!r}."))
-    return 1
+    bound = {row["media_key"] for row in store.list_bindings(library)
+             if args.provider in (None, row["provider"])}
+    found = _find_item(store, library, args.title, style, within=bound,
+                       missing=f"No binding{which} on {args.title!r} in {library!r}.")
+    if found is None:
+        return 1
+    key, name = found
+    store.delete_binding(library, key, args.provider)
+    what = f"{args.provider} id" if args.provider else "bindings"
+    print(f"{style.green('removed')} {what} for {name or key} in {library}")
+    remaining = store.get_bindings(library, key)
+    if remaining:
+        print(style.dim(f"  still pinned: {', '.join(str(e) for e in remaining)}"))
+    return 0
 
 
 def cmd_manual(args, config: AppConfig, store: Store, style: Style, as_json: bool) -> int:
@@ -416,12 +429,13 @@ def cmd_manual(args, config: AppConfig, store: Store, style: Style, as_json: boo
     noun = _noun(config, library)
     if args.command == "unmanual":
         decided = store.manual_for_library(library)
-        found = _find_item(store, library, args.title, style, within=set(decided))
+        found = _find_item(store, library, args.title, style, within=set(decided),
+                           missing=f"No genres decided by hand on {args.title!r} in {library!r}.")
         if found is None:
             return 1
-        key, title = found
+        key, name = found
         store.delete_manual(library, key)
-        print(f"{style.green('handed back')} {style.bold(title)} in {library}: "
+        print(f"{style.green('handed back')} {style.bold(name or key)} in {library}: "
               f"the sources decide its {noun} again from the next run")
         if noun == "collections" or (entry is not None and not entry.clear_genres):
             print(style.dim("  This library merges, so names the decision added stay on the "
@@ -440,13 +454,13 @@ def cmd_manual(args, config: AppConfig, store: Store, style: Style, as_json: boo
     found = _find_item(store, library, args.title, style)
     if found is None:
         return 1
-    key, title = found
+    key, name = found
     before = store.manual_for_library(library).get(key)
     note = args.note if args.note is not None else (before.note if before else None)
     store.set_manual(library, key, added=added, removed=removed, locked=args.lock,
-                     note=note or None, title=title if title != key else None)
+                     note=note or None, title=name)
     after = ManualTags(tuple(added), tuple(removed), args.lock)
-    print(f"{style.green('decided')} {style.bold(title)} in {library}: "
+    print(f"{style.green('decided')} {style.bold(name or key)} in {library}: "
           f"{_describe_manual(after, noun)}")
     if before is not None and (before.added, before.removed, before.locked) != (
         after.added, after.removed, after.locked
@@ -457,42 +471,73 @@ def cmd_manual(args, config: AppConfig, store: Store, style: Style, as_json: boo
 
 
 def _find_item(
-    store: Store, library: str, text: str, style: Style, *, within: set[str] | None = None
-) -> tuple[str, str] | None:
-    """The ``(media_key, title)`` a typed title or key names, or None once said why.
+    store: Store, library: str, text: str, style: Style, *,
+    within: set[str] | None = None, missing: str = "",
+) -> tuple[str, str | None] | None:
+    """The ``(media_key, name)`` a typed title or key names, or None once said why.
 
     Most items are keyed by a GUID, so a bare title stored as the key would
-    match nothing and be ignored without a word; it is looked up instead.
+    match nothing and be ignored without a word; it is looked up instead, and
+    an exact key always wins over a title that happens to spell it.
+
+    ``within`` narrows the choice to items that have something to remove --
+    typed exactly, that includes a key no lookup finds, such as one an older
+    version filed under a typed title -- and ``missing`` is what to say when
+    none of them matches. Without it, a title known only from v1's progress
+    files is refused: it may name a key no run uses any more.
     """
-    if not text.strip():
+    wanted = text.strip()
+    if not wanted:
         print(style.yellow("Give the item's title, or its key as the web UI shows it."))
         return None
-    found = store.find_keys(library, text)
+    typed_key = guid_key(wanted)
+    probe = typed_key or wanted
     if within is not None:
-        found = [(key, title) for key, title in found if key in within]
-    if len(found) == 1:
-        return found[0]
-    if found:
+        exact = next((k for k in (text, wanted, probe) if k in within), None)
+        if exact is not None:
+            return exact, next((m.title or None for m in store.find_keys(library, exact)
+                                if m.media_key == exact), None)
+    found = store.find_keys(library, probe)
+    if within is not None:
+        found = [m for m in found if m.media_key in within]
+    found = [m for m in found if m.media_key == probe] or found
+    if len(found) > 1:
         print(style.yellow(f"{text!r} could be {len(found)} items in {library}; "
                            "give the key of the one you mean:"))
-        for key, title in found:
-            print(f"  {key:30} {title}")
+        for match in found:
+            print(f"  {match.media_key:30} {match.title}")
         return None
-    guid = ExternalId.parse(text.strip())
-    if within is None and guid is not None and guid.scheme in KNOWN_GUID_SCHEMES:
-        # A key the web UI shows, for an item no run has reached yet. Spelt the
-        # way the pipeline spells keys, or it would never be found.
-        print(style.dim(f"  {guid} has not been seen in a run yet; this applies once an "
+    if found:
+        match = found[0]
+        if within is None and match.v1_only:
+            print(style.yellow(
+                f"{match.title or match.media_key!r} is known in {library!r} only from v1's "
+                "progress files, under a key no run may use any more. Run the library once, "
+                "or give the item's key as the web UI shows it."
+            ))
+            return None
+        return match.media_key, match.title or None
+    if within is None and typed_key is not None:
+        # A key the web UI shows, for an item no run has reached yet.
+        print(style.dim(f"  {typed_key} has not been seen in a run yet; this applies once an "
                         "item keyed that way turns up."))
-        return str(guid), str(guid)
+        if typed_key.startswith(("anidb://", "imdb://")):
+            print(style.dim("  An item is keyed by its tmdb, mal, anilist or tvdb id when it has "
+                            "one; an anidb or imdb key only fits an item with none of those."))
+        return typed_key, None
     if within is not None:
-        print(style.yellow(f"No genres decided by hand on {text!r} in {library!r}."))
+        print(style.yellow(missing or f"Nothing to remove on {text!r} in {library!r}."))
     else:
         print(style.yellow(
             f"No item called {text!r} has been seen in {library!r} yet. Run the library "
             "once, or give the item's key as the web UI shows it (e.g. tmdb://1234)."
         ))
     return None
+
+
+def _named(title: str | None, key: str, style: Style) -> str:
+    """An item as the lists show it: its name with the key beside it, or the key."""
+    return f"{title} {style.dim(key)}" if title else key
 
 
 def _noun(config: AppConfig, library: str) -> str:
@@ -524,8 +569,8 @@ def _list_manual(
         return 0
     for lib, key, tags in entries:
         note = f"  {style.dim(tags.note)}" if tags.note else ""
-        name = f"{tags.title} {style.dim(key)}" if tags.title else key
-        print(f"{lib:20} {name}  {_describe_manual(tags, _noun(config, lib))}{note}")
+        print(f"{lib:20} {_named(tags.title, key, style)}  "
+              f"{_describe_manual(tags, _noun(config, lib))}{note}")
     return 0
 
 
@@ -540,8 +585,11 @@ def cmd_bindings(args, config: AppConfig, store: Store, style: Style, as_json: b
         return 0
     for row in rows:
         note = f"  {style.dim(row['note'])}" if row["note"] else ""
-        print(f"{row['library']:20} {row['media_key']:40} -> "
-              f"{row['provider']}://{row['provider_id']}{note}")
+        # No cached name: an item no run has reached yet, or a pin an older
+        # version filed under a typed title, which no run will ever look up.
+        unseen = "" if row["title"] else style.yellow("  (no run has seen this key)")
+        print(f"{row['library']:20} {_named(row['title'], row['media_key'], style)}  "
+              f"-> {row['provider']}://{row['provider_id']}{note}{unseen}")
     return 0
 
 
@@ -606,28 +654,37 @@ def cmd_runs(args, store: Store, style: Style, as_json: bool) -> int:
     return 0
 
 
-def cmd_failures(args, store: Store, style: Style, as_json: bool) -> int:
-    """Print the items a library could not resolve."""
-    rows = store.failures(args.library, args.limit)
+def cmd_failures(
+    args, config: AppConfig | None, store: Store, style: Style, as_json: bool
+) -> int:
+    """Print the items a library could not resolve. The config only sharpens
+    the hint: a diagnostic command must not need one that loads."""
+    library = _library_name(config, args.library) if config is not None else args.library
+    rows = store.failures(library, args.limit)
     if as_json:
         print(json.dumps([dict(r) for r in rows], indent=2, ensure_ascii=False))
         return 0
     if not rows:
-        print(style.green(f"No failures recorded for {args.library}."))
+        print(style.green(f"No failures recorded for {library}."))
         return 0
     for row in rows:
         title = f"{row['title']} ({row['year']})" if row["year"] else row["title"]
         attempts = style.dim(f"attempt {row['attempts']}")
-        print(f"{style.red('x')} {style.bold(title)}  {attempts}")
+        print(f"{style.red('x')} {style.bold(title)}  {style.dim(row['media_key'])}  {attempts}")
         print(f"    {row['last_error']}")
+    # A scheme this library's sources read: offering tmdb to a Jikan library
+    # sent people to a command that is refused.
+    entry = config.find(library) if config is not None else None
+    schemes = bindable_schemes(entry.type, entry.resolved_providers) if entry else ["tmdb"]
     print(style.dim(
-        f"\n{len(rows)} shown. Pin a correct id with: "
-        f"plex-auto-genres bind '{args.library}' '<title>' tmdb <id>"
+        f"\n{len(rows)} shown. Pin the right record with: plex-auto-genres bind "
+        f"{shlex.quote(library)} '<title or key>' {schemes[0]} <id>"
+        + (f"  (this library takes {', '.join(schemes)})" if len(schemes) > 1 else "")
     ))
     if args.retry:
-        cleared = store.clear_failures(args.library)
+        cleared = store.clear_failures(library)
         print(style.green(
-            f"Cleared {cleared} failed entries; the next run retries them. "
+            f"Reset {cleared} failed entries; the next run retries them. "
             "Everything that already succeeded is untouched."
         ))
     return 0
@@ -807,7 +864,11 @@ def _dispatch(args, store: Store, style: Style) -> int:
     if args.command == "runs":
         return cmd_runs(args, store, style, args.json)
     if args.command == "failures":
-        return cmd_failures(args, store, style, args.json)
+        try:
+            usable: AppConfig | None = load_config(args.config, missing_ok=True)
+        except ConfigError:
+            usable = None
+        return cmd_failures(args, usable, store, style, args.json)
     if args.command == "schedule":
         return asyncio.run(cmd_schedule(args, args.config, args.db, style))
     if args.command == "serve":

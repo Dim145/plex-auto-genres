@@ -13,7 +13,7 @@ from typing import Literal
 
 from .config import KEYWORD_PROVIDERS, AppConfig, is_v1_layout, load_config
 from .errors import ConfigError
-from .models import MediaType
+from .models import MediaType, guid_key
 from .store import Store
 from .taxonomy import check_names, fetch_live_genres
 
@@ -133,8 +133,27 @@ def run_doctor(config_path: str, store: Store, *, check_taxonomy: bool = True) -
                 f"{run.library}: useKeywords without maxGenres",
                 "TMDB can return 50+ keywords per title. Set overrides.maxGenres.",
             ))
+        checks.extend(_unseen_pins(run.library, store))
 
     return DoctorReport(checks, config)
+
+
+def _unseen_pins(library: str, store: Store) -> list[Check]:
+    """Pins on a key that is no GUID and no run has cached: the old `bind`
+    filed pins under the title typed to it, and no run ever looked them up."""
+    unseen = sorted({row["media_key"] for row in store.list_bindings(library)
+                     if row["title"] is None and guid_key(row["media_key"]) is None})
+    if not unseen:
+        return []
+    return [Check(
+        f"pins-unseen:{library}", "warn",
+        f"{library}: {len(unseen)} pin(s) on a key no run has seen",
+        "Older versions of `bind` filed a pin under the title typed to it, which no run "
+        "looks up when Plex knows the item by a GUID. Remove one with `unbind` and that "
+        "key, then bind the item again by title. A pin on an item the library has not "
+        "reached yet is fine: run the library.",
+        items=unseen,
+    )]
 
 
 def _config_is_v1(config_path: str) -> bool:

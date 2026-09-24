@@ -134,6 +134,10 @@ class BindingView(BaseModel):
     provider_id: str
     note: str | None = None
     created_at: float
+    #: The item's name as the runs cached it, "Title (Year)"; null for a key
+    #: no run has recorded -- an item not reached yet, or a pin that matches
+    #: nothing.
+    title: str | None = None
 
 
 class Problem(BaseModel):

@@ -20,11 +20,13 @@ import re
 import sqlite3
 import threading
 import time
+import unicodedata
 import uuid
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 from .models import ExternalId, ManualTags, RunReport
 
@@ -146,11 +148,14 @@ class CachedState:
     provider_id: str | None = None
     score: float | None = None
     source: str | None = None
+    #: The Plex item it was recorded for. Rows imported from v1's progress
+    #: files have none, which is how they are told from a run's own rows.
+    rating_key: int | None = None
 
 
 _STATE_COLUMNS = (
     "status, fingerprint, attempts, updated_at, genres, last_error, "
-    "provider, provider_id, score, source"
+    "provider, provider_id, score, source, rating_key"
 )
 
 
@@ -166,6 +171,7 @@ def _state_from_row(row: sqlite3.Row) -> CachedState:
         provider_id=row["provider_id"],
         score=row["score"],
         source=row["source"],
+        rating_key=row["rating_key"],
     )
 
 
@@ -194,6 +200,31 @@ def run_status(row: sqlite3.Row, *, live: bool) -> str:
     if report.get("error") or report.get("failed", 0):
         return "partial" if report.get("written", 0) else "failed"
     return "ok"
+
+
+#: What else follows an item when its media key changes: ``(move, drop)``.
+_FOLLOW_THE_KEY = (
+    ("UPDATE OR IGNORE manual_tags SET media_key = ? WHERE library = ? AND media_key = ?",
+     "DELETE FROM manual_tags WHERE library = ? AND media_key = ?"),
+    ("UPDATE OR IGNORE bindings SET media_key = ? WHERE library = ? AND media_key = ?",
+     "DELETE FROM bindings WHERE library = ? AND media_key = ?"),
+)
+
+
+class ItemMatch(NamedTuple):
+    """An item a typed name may mean, as :meth:`Store.find_keys` finds it."""
+
+    media_key: str
+    #: As the item is shown, "Title (Year)"; empty when only its key is known.
+    title: str
+    #: Known only from rows imported out of v1's progress files, which may be
+    #: filed under a key no run uses any more (and in every library of the type).
+    v1_only: bool = False
+
+
+def _comparable(text: str) -> str:
+    """What two spellings of one name share: case and Unicode form aside."""
+    return unicodedata.normalize("NFC", text.strip()).casefold()
 
 
 _YEAR_SUFFIX = re.compile(r"\s+\(\d{4}\)$")
@@ -449,9 +480,9 @@ class Store:
     def rename_media_keys(self, library: str, mapping: dict[str, str]) -> int:
         """Move cache rows from one key to another, e.g. v1's ``"Title (Year)"``
         onto the GUID the pipeline now keys by. A row already present under the
-        new key wins; the stale one is dropped. A decision by hand filed under
-        the old key moves the same way, or the pipeline would never find it.
-        Returns how many cache rows were moved."""
+        new key wins; the stale one is dropped. A decision by hand or a binding
+        filed under the old key moves the same way, or the pipeline would never
+        find it. Returns how many cache rows were moved."""
         moved = 0
         with self._tx() as conn:
             for old, new in mapping.items():
@@ -464,68 +495,84 @@ class Store:
                 conn.execute(
                     "DELETE FROM media_state WHERE library = ? AND media_key = ?", (library, old)
                 )
-                conn.execute(
-                    "UPDATE OR IGNORE manual_tags SET media_key = ? "
-                    "WHERE library = ? AND media_key = ?",
-                    (new, library, old),
-                )
-                conn.execute(
-                    "DELETE FROM manual_tags WHERE library = ? AND media_key = ?", (library, old)
-                )
+                for move, drop in _FOLLOW_THE_KEY:
+                    conn.execute(move, (new, library, old))
+                    conn.execute(drop, (library, old))
         return moved
 
-    def find_keys(self, library: str, text: str) -> list[tuple[str, str]]:
-        """The items a typed name may mean, as ``(media_key, title)``.
+    def find_keys(self, library: str, text: str) -> list[ItemMatch]:
+        """The items a typed name may mean.
 
-        A match is the key itself, or an item cached or overridden under that
-        title, with or without its year, ignoring case. The CLI has no Plex
-        listing to search, and most items are keyed by a GUID nobody types.
+        A match is the key itself, or an item cached or decided by hand under
+        that title, with or without its year, ignoring case and Unicode form.
+        The CLI has no Plex listing to search, and most items are keyed by a
+        GUID nobody types. Pins are not searched: the old ``bind`` stored
+        them under whatever was typed, and those keys name no item.
         """
-        wanted = text.strip().casefold()
+        wanted = _comparable(text)
         if not wanted:
             # A blank name would match every override saved without one.
             return []
         with self._read() as conn:
             rows = conn.execute(
-                "SELECT media_key, title, year FROM media_state WHERE library = ? "
+                "SELECT media_key, title, year, rating_key IS NULL AS v1 FROM media_state "
+                "WHERE library = ? "
                 "UNION ALL "
-                "SELECT media_key, COALESCE(title, ''), NULL FROM manual_tags WHERE library = ?",
+                "SELECT media_key, COALESCE(title, ''), NULL, 0 FROM manual_tags "
+                "WHERE library = ?",
                 (library, library),
             ).fetchall()
-        found: dict[str, str] = {}
+        found: dict[str, ItemMatch] = {}
         for row in rows:
             title = row["title"] or ""
             named = f"{title} ({row['year']})" if row["year"] else title
-            # An override stores the name as shown, year included.
+            # A decision stores the name as shown, year included.
             bare = _YEAR_SUFFIX.sub("", title)
-            if wanted in {n.casefold() for n in (row["media_key"], title, named, bare)}:
-                found.setdefault(row["media_key"], named or row["media_key"])
-        return list(found.items())
+            if wanted not in {_comparable(n) for n in (row["media_key"], title, named, bare)}:
+                continue
+            seen = found.get(row["media_key"])
+            found[row["media_key"]] = ItemMatch(
+                row["media_key"],
+                seen.title if seen is not None and seen.title else named,
+                bool(row["v1"]) and (seen is None or seen.v1_only),
+            )
+        return list(found.values())
 
     def forget(self, library: str, media_key: str) -> bool:
-        """Drop one item's cache entry so the next run looks at it again."""
+        """Mark one item's cached result stale so the next run looks at it again.
+
+        The row stays, emptied of its fingerprint: it is where the CLI finds
+        an item by title, and deleting it left `bind <title>` refusing an item
+        it had just been told to retry.
+        """
         with self._tx() as conn:
             cur = conn.execute(
-                "DELETE FROM media_state WHERE library = ? AND media_key = ?", (library, media_key)
+                "UPDATE media_state SET fingerprint = '' WHERE library = ? AND media_key = ?",
+                (library, media_key),
             )
         return cur.rowcount > 0
 
     def clear_failures(self, library: str) -> int:
-        """Drop the failed entries so the next run retries them straight away.
+        """Mark the failed entries stale so the next run retries them at once,
+        with their backoff starting over.
 
         Only the failures: wiping the whole library to retry a handful of
-        titles means re-tagging everything that was already correct.
+        titles means re-tagging everything that was already correct. The rows
+        stay, as for :meth:`forget`: `failures` has just suggested binding them
+        by title.
         """
         with self._tx() as conn:
             cur = conn.execute(
-                "DELETE FROM media_state WHERE library = ? AND status = 'failed'", (library,)
+                "UPDATE media_state SET fingerprint = '', attempts = 0 "
+                "WHERE library = ? AND status = 'failed'",
+                (library,),
             )
         return cur.rowcount
 
     def failures(self, library: str, limit: int = 100) -> list[sqlite3.Row]:
         with self._read() as conn:
             return conn.execute(
-                "SELECT title, year, attempts, last_error, updated_at FROM media_state "
+                "SELECT media_key, title, year, attempts, last_error, updated_at FROM media_state "
                 "WHERE library = ? AND status = 'failed' ORDER BY updated_at DESC LIMIT ?",
                 (library, limit),
             ).fetchall()
@@ -563,7 +610,10 @@ class Store:
         """Pin an item to one source's id, overriding automatic matching.
 
         An item may hold one pin per source; setting the same source again
-        replaces that pin alone.
+        replaces that pin alone. The cached result stays: the pins are part of
+        the item's fingerprint (:func:`models.stamp_pins`), so a result made
+        without this one is stale on its own. Deleting the row instead lost a
+        pin saved while a run was under way, and the item's name with it.
         """
         with self._tx() as conn:
             conn.execute(
@@ -574,10 +624,6 @@ class Store:
                 "provider_id=excluded.provider_id, "
                 "note=excluded.note, created_at=excluded.created_at",
                 (library, media_key, provider, provider_id, note, time.time()),
-            )
-            # A new binding invalidates whatever the automatic match produced.
-            conn.execute(
-                "DELETE FROM media_state WHERE library = ? AND media_key = ?", (library, media_key)
             )
 
     def get_bindings(self, library: str, media_key: str) -> list[ExternalId]:
@@ -593,7 +639,7 @@ class Store:
     def delete_binding(self, library: str, media_key: str, provider: str | None = None) -> bool:
         """Remove an item's pins, or just the one naming ``provider``.
 
-        A cached match produced *through* a binding goes with it; the next run
+        A result cached *through* a pin is stamped with it, so the next run
         re-resolves the item from what pins remain, its GUID, or a search.
         """
         with self._tx() as conn:
@@ -607,11 +653,6 @@ class Store:
                     "DELETE FROM bindings WHERE library = ? AND media_key = ? AND provider = ?",
                     (library, media_key, provider),
                 )
-            if cur.rowcount:
-                conn.execute(
-                    "DELETE FROM media_state WHERE library = ? AND media_key = ?",
-                    (library, media_key),
-                )
         return cur.rowcount > 0
 
     def bindings_for_library(self, library: str) -> dict[str, list[ExternalId]]:
@@ -624,16 +665,23 @@ class Store:
         return out
 
     def list_bindings(self, library: str | None = None) -> list[sqlite3.Row]:
-        """Every binding, optionally narrowed to one library."""
+        """Every binding, optionally narrowed to one library, with ``title``:
+        the item's name as the runs cached it ("Title (Year)"), or NULL for a
+        key no run has recorded."""
+        query = (
+            "SELECT b.*, CASE WHEN s.year IS NULL THEN s.title "
+            "ELSE s.title || ' (' || s.year || ')' END AS title "
+            "FROM bindings b LEFT JOIN media_state s "
+            "ON s.library = b.library AND s.media_key = b.media_key "
+        )
         with self._read() as conn:
             if library:
                 return conn.execute(
-                    "SELECT * FROM bindings WHERE library = ? "
-                    "ORDER BY media_key, created_at, provider",
+                    query + "WHERE b.library = ? ORDER BY b.media_key, b.created_at, b.provider",
                     (library,),
                 ).fetchall()
             return conn.execute(
-                "SELECT * FROM bindings ORDER BY library, media_key, created_at, provider"
+                query + "ORDER BY b.library, b.media_key, b.created_at, b.provider"
             ).fetchall()
 
     # -- manual tags --------------------------------------------------------

@@ -94,11 +94,19 @@ def test_an_item_pins_one_id_per_source(store: Store):
     ], "setting a source again replaces that pin alone"
 
 
-def test_setting_a_binding_invalidates_the_cached_match(store: Store):
-    store.record_success("Animes", "Monster", fingerprint="fp", title="Monster", year=2004,
+def test_a_pin_makes_the_cached_match_stale_without_dropping_it(store: Store):
+    """The row keeps the name the CLI finds the item by; the pin, stamped into
+    the fingerprint, is what makes the old match stale. Deleting the row lost
+    a pin saved while a run was going, and the name with it."""
+    from plex_auto_genres.models import stamp_pins
+
+    store.record_success("Animes", "mal://1", fingerprint="fp", title="Monster", year=2004,
                          rating_key=1, genres=["Wrong"], provider="jikan", provider_id="999")
-    store.set_binding("Animes", "Monster", "mal", "19")
-    assert store.get_state("Animes", "Monster") is None
+    store.set_binding("Animes", "mal://1", "mal", "19")
+
+    state = store.get_state("Animes", "mal://1")
+    assert state is not None and state.fingerprint == "fp"
+    assert Store.needs_work(state, stamp_pins("fp", store.get_bindings("Animes", "mal://1")))
 
 
 def test_delete_binding(store: Store):
@@ -320,9 +328,24 @@ def test_clear_failures_leaves_the_successes_alone(store: Store):
                          rating_key=3, error="jikan: rate limited")
 
     assert store.clear_failures("A") == 1
-    assert store.get_state("A", "k1") is not None, "the successful entry survives"
-    assert store.get_state("A", "k2") is None
-    assert store.get_state("B", "k3") is not None, "another library is untouched"
+    assert store.get_state("A", "k1").fingerprint == "f", "the successful entry is untouched"
+    retried = store.get_state("A", "k2")
+    assert retried is not None, "kept: `failures` has just suggested binding it by title"
+    assert Store.needs_work(retried, "f") and retried.attempts == 0, "retried at once"
+    assert store.get_state("B", "k3").fingerprint == "f", "another library is untouched"
+
+
+def _found(store: Store, library: str, text: str) -> list[tuple[str, str]]:
+    return [(m.media_key, m.title) for m in store.find_keys(library, text)]
+
+
+def _seen(db, *items: tuple[str, str, int | None]) -> None:
+    """Cache rows as a run leaves them: the only place the CLI finds titles."""
+    with Store(db) as seeded:
+        for key, title, year in items:
+            seeded.record_success("Animes", key, fingerprint="f", title=title, year=year,
+                                  rating_key=1, genres=["Drama"], provider="jikan",
+                                  provider_id=key.split("://")[-1])
 
 
 def test_the_cli_refuses_a_binding_nothing_can_resolve(tmp_path, config_file, monkeypatch, capsys):
@@ -331,7 +354,9 @@ def test_the_cli_refuses_a_binding_nothing_can_resolve(tmp_path, config_file, mo
 
     monkeypatch.setenv("PLEX_BASE_URL", "http://plex:32400")
     monkeypatch.setenv("PLEX_TOKEN", "t")
-    argv = ["--config", str(config_file), "--db", str(tmp_path / "cli.db"), "bind"]
+    db = tmp_path / "cli.db"
+    argv = ["--config", str(config_file), "--db", str(db), "bind"]
+    _seen(db, ("mal://1", "Monster", 2004))
 
     assert cli.main([*argv, "Animes", "Monster", "tmdb", "7"]) == 1
     refusal = capsys.readouterr().out
@@ -339,6 +364,79 @@ def test_the_cli_refuses_a_binding_nothing_can_resolve(tmp_path, config_file, mo
 
     assert cli.main([*argv, "Animes", "Monster", "anidb", "4521"]) == 0
     assert "bound" in capsys.readouterr().out
+    with Store(db) as after:
+        assert after.get_bindings("Animes", "mal://1") == [ExternalId("anidb", "4521")]
+
+
+def test_the_cli_binds_the_item_a_title_names_and_unbinds_it_by_that_title(
+    tmp_path, config_file, monkeypatch, capsys
+):
+    """A title was stored as the key, and the pipeline looks pins up by GUID:
+    `bind` said "bound" and the pin was never applied."""
+    run, db = _cli(tmp_path, config_file, monkeypatch)
+    _seen(db, ("mal://1", "Monster", 2004))
+
+    assert run("bind", "animes", "monster", "mal", "19", "--note", "wrong season") == 0
+    assert "bound Monster (2004) in Animes" in capsys.readouterr().out
+    with Store(db) as after:
+        assert after.get_bindings("Animes", "mal://1") == [ExternalId("mal", "19")]
+        assert after.get_bindings("Animes", "monster") == []
+        assert after.get_state("Animes", "mal://1") is not None, "the row keeps the name"
+
+    # The cached row, the other place with the name, is gone: the pin keeps it.
+    assert run("unbind", "Animes", "Monster") == 0
+    assert "removed bindings for Monster (2004)" in capsys.readouterr().out
+    assert run("unbind", "Animes", "Monster") == 1
+    assert "No binding on 'Monster'" in capsys.readouterr().out
+
+
+def test_the_cli_will_not_bind_what_it_cannot_place(tmp_path, config_file, monkeypatch, capsys):
+    run, db = _cli(tmp_path, config_file, monkeypatch)
+    _seen(db, ("mal://1", "Monster", 2004), ("mal://9", "Monster", 2019))
+
+    assert run("bind", "Animes", "Nowhere", "mal", "19") == 1
+    assert "has been seen" in capsys.readouterr().out
+    assert run("bind", "Animes", "Monster", "mal", "19") == 1
+    listed = capsys.readouterr().out
+    assert "mal://1" in listed and "mal://9" in listed, "two items share the title"
+    assert run("bind", "Animes", "Monster (2019)", "mal", "19") == 0
+    capsys.readouterr()
+
+    # A key for an item no run reached yet, spelt the way the pipeline keys it.
+    assert run("bind", "Animes", " MAL://7 ", "mal", "70") == 0
+    with Store(db) as after:
+        assert after.get_bindings("Animes", "mal://9") == [ExternalId("mal", "19")]
+        assert after.get_bindings("Animes", "mal://7") == [ExternalId("mal", "70")]
+        assert [r["media_key"] for r in after.list_bindings("Animes")] == ["mal://7", "mal://9"]
+
+
+def test_unbinding_one_source_looks_only_at_items_pinned_on_it(
+    tmp_path, config_file, monkeypatch, capsys
+):
+    run, db = _cli(tmp_path, config_file, monkeypatch)
+    _seen(db, ("mal://1", "Monster", 2004))
+    assert run("bind", "Animes", "Monster", "mal", "19") == 0
+    capsys.readouterr()
+
+    assert run("unbind", "Animes", "Monster", "--provider", "anidb") == 1
+    assert "No binding for anidb on 'Monster'" in capsys.readouterr().out
+    with Store(db) as after:
+        assert after.get_bindings("Animes", "mal://1") == [ExternalId("mal", "19")]
+
+
+def test_failures_name_each_key_and_a_bind_that_works_here(
+    tmp_path, config_file, monkeypatch, capsys
+):
+    """The hint suggested tmdb, which a Jikan library refuses to bind."""
+    run, db = _cli(tmp_path, config_file, monkeypatch)
+    with Store(db) as seeded:
+        seeded.record_failure("Animes", "mal://3", fingerprint="f", title="Lost", year=2001,
+                              rating_key=3, error="jikan: no anime matching 'Lost'")
+
+    assert run("failures", "--library", "animes") == 0
+    out = capsys.readouterr().out
+    assert "mal://3" in out
+    assert "bind Animes '<title or key>' mal <id>" in out
 
 
 # -- manual tags -----------------------------------------------------------
@@ -390,11 +488,11 @@ def test_find_keys_reads_titles_as_people_type_them(store: Store):
     store.record_success("Animes", "mal://2", fingerprint="f", title="Solo", year=None,
                          rating_key=2, genres=[], provider="jikan", provider_id="2")
 
-    assert store.find_keys("Animes", "monster") == [("mal://1", "Monster (2004)")]
-    assert store.find_keys("Animes", "Monster (2004)") == [("mal://1", "Monster (2004)")]
-    assert store.find_keys("Animes", "mal://2") == [("mal://2", "Solo")]
-    assert store.find_keys("Animes", "Monster (1999)") == []
-    assert store.find_keys("Films", "Monster") == [], "another library is not searched"
+    assert _found(store, "Animes", "monster") == [("mal://1", "Monster (2004)")]
+    assert _found(store, "Animes", "Monster (2004)") == [("mal://1", "Monster (2004)")]
+    assert _found(store, "Animes", "mal://2") == [("mal://2", "Solo")]
+    assert _found(store, "Animes", "Monster (1999)") == []
+    assert _found(store, "Films", "Monster") == [], "another library is not searched"
 
 
 def test_find_keys_knows_an_item_by_the_name_its_decision_kept(store: Store):
@@ -402,8 +500,45 @@ def test_find_keys_knows_an_item_by_the_name_its_decision_kept(store: Store):
     store.set_manual("Animes", "mal://1", added=["A"], removed=[], locked=False,
                      title="Monster (2004)")
 
-    assert store.find_keys("Animes", "Monster") == [("mal://1", "Monster (2004)")]
-    assert store.find_keys("Animes", "monster (2004)") == [("mal://1", "Monster (2004)")]
+    assert _found(store, "Animes", "Monster") == [("mal://1", "Monster (2004)")]
+    assert _found(store, "Animes", "monster (2004)") == [("mal://1", "Monster (2004)")]
+
+
+def test_pins_are_not_items_and_list_under_the_cached_name(store: Store):
+    """The old `bind` filed pins under whatever was typed; such a key names no
+    item, so a title lookup must not offer it. Lists take names from the cache."""
+    store.record_success("Animes", "mal://1", fingerprint="f", title="Monster", year=2004,
+                         rating_key=1, genres=[], provider="jikan", provider_id="1")
+    store.set_binding("Animes", "Monster", "mal", "19")          # what 2.3.0 stored
+    store.set_binding("Animes", "mal://1", "anidb", "4521")
+
+    assert _found(store, "Animes", "Monster") == [("mal://1", "Monster (2004)")]
+    assert {r["media_key"]: r["title"] for r in store.list_bindings("Animes")} == {
+        "Monster": None, "mal://1": "Monster (2004)"}
+
+
+def test_find_keys_ignores_the_unicode_form(store: Store):
+    """A title Plex stored decomposed (from a macOS file name) never matched."""
+    import unicodedata
+
+    store.record_success("Animes", "mal://1", fingerprint="f", title=unicodedata.normalize(
+        "NFD", "Pok\u00e9mon"), year=None, rating_key=1, genres=[], provider="jikan",
+        provider_id="1")
+
+    assert [m.media_key for m in store.find_keys("Animes", "pok\u00e9mon")] == ["mal://1"]
+
+
+def test_find_keys_says_which_items_only_v1_knows(store: Store):
+    """v1's progress files were copied into every library of a type, under a
+    key no run may use: a title known only from them is no proof of an item."""
+    store.record_success("Animes", "Monster (2004)", fingerprint="f", title="Monster",
+                         year=2004, rating_key=None, genres=[], provider=None, provider_id=None)
+    store.record_success("Animes", "mal://2", fingerprint="f", title="Solo", year=None,
+                         rating_key=2, genres=[], provider="jikan", provider_id="2")
+
+    assert [(m.media_key, m.v1_only) for m in store.find_keys("Animes", "Monster")] == [
+        ("Monster (2004)", True)]
+    assert [m.v1_only for m in store.find_keys("Animes", "Solo")] == [False]
 
 
 def test_a_blank_name_finds_nothing(store: Store):
@@ -415,14 +550,17 @@ def test_a_blank_name_finds_nothing(store: Store):
     assert store.find_keys("Animes", "   ") == []
 
 
-def test_a_decision_moves_with_its_items_v1_key(store: Store):
+def test_a_decision_and_a_pin_move_with_their_items_v1_key(store: Store):
     store.record_success("Animes", "Monster (2004)", fingerprint="f", title="Monster",
                          year=2004, rating_key=1, genres=[], provider="jikan", provider_id="1")
     store.set_manual("Animes", "Monster (2004)", added=["A"], removed=[], locked=False)
+    store.set_binding("Animes", "Monster (2004)", "mal", "19")
 
     store.rename_media_keys("Animes", {"Monster (2004)": "mal://1"})
 
     assert list(store.manual_for_library("Animes")) == ["mal://1"]
+    assert store.get_bindings("Animes", "mal://1") == [ExternalId("mal", "19")]
+    assert store.get_bindings("Animes", "Monster (2004)") == []
 
 
 def test_a_manual_table_from_an_earlier_build_gains_its_title(tmp_path):
@@ -454,7 +592,7 @@ def test_find_keys_lists_every_item_a_shared_title_may_mean(store: Store):
         store.record_success("Animes", key, fingerprint="f", title="Monster", year=year,
                              rating_key=1, genres=[], provider="jikan", provider_id=key)
 
-    assert {key for key, _ in store.find_keys("Animes", "Monster")} == {"mal://1", "mal://9"}
+    assert {m.media_key for m in store.find_keys("Animes", "Monster")} == {"mal://1", "mal://9"}
 
 
 def _cli(tmp_path, config_file, monkeypatch):
@@ -528,3 +666,119 @@ def test_the_cli_refuses_what_it_cannot_place(tmp_path, config_file, monkeypatch
     assert (tags.locked, tags.added, tags.removed) == (True, ("Mecha",), ("Kids",)), (
         "names stripped as the API does, and a lock keeps its refusals"
     )
+
+
+def test_an_item_without_a_guid_keeps_its_name_after_binding(
+    tmp_path, config_file, monkeypatch, capsys
+):
+    """Its key is its name; binding dropped the only row that held it."""
+    run, db = _cli(tmp_path, config_file, monkeypatch)
+    _seen(db, ("Monster (2004)", "Monster", 2004))
+
+    assert run("bind", "Animes", "Monster", "mal", "19") == 0
+    assert run("unbind", "Animes", "Monster") == 0
+    assert run("bind", "Animes", "Monster", "mal", "20") == 0
+    capsys.readouterr()
+    with Store(db) as after:
+        assert after.get_bindings("Animes", "Monster (2004)") == [ExternalId("mal", "20")]
+
+
+def test_retrying_failures_keeps_the_names_it_suggests_binding_by(
+    tmp_path, config_file, monkeypatch, capsys
+):
+    run, db = _cli(tmp_path, config_file, monkeypatch)
+    with Store(db) as seeded:
+        seeded.record_failure("Animes", "mal://3", fingerprint="f", title="Lost", year=2001,
+                              rating_key=3, error="jikan: no anime matching 'Lost'")
+
+    assert run("failures", "--library", "Animes", "--retry") == 0
+    capsys.readouterr()
+    assert run("bind", "Animes", "Lost", "mal", "33") == 0
+    with Store(db) as after:
+        assert after.get_bindings("Animes", "mal://3") == [ExternalId("mal", "33")]
+
+
+def test_a_pin_the_old_bind_filed_under_a_title_is_no_item(
+    tmp_path, config_file, monkeypatch, capsys
+):
+    """2.3.0 stored `bind Animes "Monster" mal 19` under the key "Monster"."""
+    run, db = _cli(tmp_path, config_file, monkeypatch)
+    _seen(db, ("mal://1", "Monster", 2004))
+    with Store(db) as seeded:
+        seeded.set_binding("Animes", "Monster", "mal", "19")
+
+    assert run("manual", "Animes", "Monster", "--add", "Psychological") == 0
+    assert run("bind", "Animes", "Monster", "mal", "21") == 0
+    # Typed exactly, the dead key is still what `unbind` removes.
+    assert run("unbind", "Animes", "Monster") == 0
+    capsys.readouterr()
+    with Store(db) as after:
+        assert list(after.manual_for_library("Animes")) == ["mal://1"]
+        assert after.get_bindings("Animes", "mal://1") == [ExternalId("mal", "21")]
+        assert after.get_bindings("Animes", "Monster") == []
+
+
+def test_an_exact_key_wins_over_a_title_that_spells_it(tmp_path, config_file, monkeypatch, capsys):
+    """A GUID-less item's key is also a title: listing both forever meant it
+    could not be bound, decided or unbound from the CLI at all."""
+    run, db = _cli(tmp_path, config_file, monkeypatch)
+    _seen(db, ("mal://1", "Monster", 2004), ("Monster (2004)", "Monster", 2004))
+
+    assert run("bind", "Animes", "Monster (2004)", "mal", "19") == 0
+    assert run("bind", "Animes", "Monster", "mal", "20") == 1, "the bare title is ambiguous"
+    capsys.readouterr()
+    with Store(db) as after:
+        assert after.get_bindings("Animes", "Monster (2004)") == [ExternalId("mal", "19")]
+        assert after.get_bindings("Animes", "mal://1") == []
+
+
+def test_a_key_typed_another_way_finds_the_cached_item(tmp_path, config_file, monkeypatch, capsys):
+    run, db = _cli(tmp_path, config_file, monkeypatch)
+    _seen(db, ("mal://1", "Monster", 2004))
+
+    assert run("bind", "Animes", "mal://1?lang=en", "mal", "19") == 0
+    out = capsys.readouterr().out
+    assert "bound Monster (2004)" in out and "has not been seen" not in out
+
+
+def test_a_title_only_v1_knows_is_refused(tmp_path, config_file, monkeypatch, capsys):
+    run, db = _cli(tmp_path, config_file, monkeypatch)
+    with Store(db) as seeded:                           # as import_legacy_logs leaves it
+        seeded.record_success("Animes", "Monster (2004)", fingerprint="f", title="Monster",
+                              year=2004, rating_key=None, genres=[], provider=None,
+                              provider_id=None)
+
+    assert run("bind", "Animes", "Monster", "mal", "19") == 1
+    assert "only from v1's progress files" in capsys.readouterr().out
+    assert run("manual", "Animes", "Monster", "--add", "Drama") == 1
+    capsys.readouterr()
+    with Store(db) as after:
+        assert after.list_bindings("Animes") == [] and after.manual_for_library("Animes") == {}
+
+
+def test_the_failures_hint_survives_a_quote_in_the_name(tmp_path, config_file, monkeypatch, capsys):
+    import shlex
+
+    run, db = _cli(tmp_path, config_file, monkeypatch)
+    with Store(db) as seeded:
+        seeded.record_failure("Kids' Cartoons", "tmdb://3", fingerprint="f", title="Lost",
+                              year=2001, rating_key=3, error="tmdb: no match")
+
+    assert run("failures", "--library", "Kids' Cartoons") == 0
+    hint = capsys.readouterr().out.split("with: ", 1)[1].splitlines()[0].split("  (")[0]
+    assert shlex.split(hint)[:3] == ["plex-auto-genres", "bind", "Kids' Cartoons"]
+
+
+def test_failures_still_list_when_the_config_does_not_load(tmp_path, monkeypatch, capsys):
+    """A diagnostic command must not need a config that loads."""
+    from plex_auto_genres import cli
+
+    bad = tmp_path / "config.json"
+    bad.write_text("{ not json")
+    db = tmp_path / "cli.db"
+    with Store(db) as seeded:
+        seeded.record_failure("Animes", "mal://3", fingerprint="f", title="Lost", year=2001,
+                              rating_key=3, error="jikan: no anime matching 'Lost'")
+
+    assert cli.main(["--config", str(bad), "--db", str(db), "failures", "--library", "Animes"]) == 0
+    assert "Lost (2001)" in capsys.readouterr().out

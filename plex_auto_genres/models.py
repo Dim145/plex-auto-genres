@@ -179,6 +179,36 @@ class ManualTags:
         return out
 
 
+def stamp_pins(fingerprint: str, pins: Iterable[object]) -> str:
+    """The cache fingerprint of an item bound to ``pins`` (``ExternalId`` or
+    ``"scheme://id"`` strings).
+
+    A pin decides which record the sources are asked for, so a result cached
+    before it, or under another, is stale. Stamping it here rather than
+    deleting the cached row on every bind keeps a pin saved while a run is
+    under way from being lost when that run records the item a moment later,
+    and keeps the row's name and score. The pins come before a decision
+    (``base@pins+decision``): a score depends on the record, not on what a
+    person decided about its genres.
+    """
+    ids = sorted(str(pin) for pin in pins)
+    if not ids:
+        return fingerprint
+    return f"{fingerprint}@{hashlib.sha256(chr(10).join(ids).encode()).hexdigest()[:12]}"
+
+
+def guid_key(text: str) -> str | None:
+    """``text`` as the media key of an item with that GUID, or None.
+
+    Spelt the way the pipeline keys items -- ``"MAL://7?lang=en "`` is
+    ``mal://7`` -- and only for the schemes a key is ever made from.
+    """
+    parsed = ExternalId.parse(text.strip())
+    if parsed is None or parsed.scheme not in KNOWN_GUID_SCHEMES:
+        return None
+    return str(parsed)
+
+
 #: The longest tag name a decision accepts.
 MAX_NAME_LENGTH = 120
 

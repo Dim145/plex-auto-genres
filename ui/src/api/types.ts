@@ -172,6 +172,8 @@ export interface BindingView {
   provider_id: string;
   note: string | null;
   created_at: number;
+  /** The item's name as the runs cached it; null for a key no run has recorded. */
+  title: string | null;
 }
 
 export interface Problem {

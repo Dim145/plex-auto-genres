@@ -92,7 +92,10 @@ export default function Bindings() {
                 {bindings.data.map((b) => (
                   <tr key={`${b.library}/${b.media_key}/${b.provider}`}>
                     <td>{b.library}</td>
-                    <td className="mono"><Link to={`/libraries/${encodeURIComponent(b.library)}?status=bound`}>{b.media_key}</Link></td>
+                    <td>
+                      <Link to={`/libraries/${encodeURIComponent(b.library)}?status=bound`}>{b.title ?? b.media_key}</Link>
+                      {b.title && <div className="mono faint">{b.media_key}</div>}
+                    </td>
                     <td className="mono tone-teal">{b.provider}://{b.provider_id}</td>
                     <td className="muted wrap">{b.note ?? "—"}</td>
                     <td className="mono muted" title={dateTime(b.created_at)}>{relTime(b.created_at)}</td>

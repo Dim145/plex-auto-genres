@@ -417,3 +417,26 @@ def test_refused_names_go_before_the_cap_not_after():
     assert rules.apply(["Sci-Fi", "Drama"], drop=["science fiction"]) == ["Drama"], (
         "matched after the renames, as the name ends up in Plex"
     )
+
+
+
+def test_doctor_names_pins_no_run_has_seen(tmp_path, monkeypatch):
+    """The old `bind` filed pins under the typed title; nothing ever said so."""
+    from plex_auto_genres.doctor import run_doctor
+    from plex_auto_genres.store import Store
+
+    monkeypatch.setenv("PLEX_BASE_URL", "http://plex:32400")
+    monkeypatch.setenv("PLEX_TOKEN", "t")
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"version": 2, "libraries": [
+        {"library": "Animes", "type": "anime", "useGenres": True}]}))
+    store = Store(tmp_path / "s.db")
+    store.record_success("Animes", "mal://1", fingerprint="f", title="Monster", year=2004,
+                         rating_key=1, genres=[], provider="jikan", provider_id="1")
+    store.set_binding("Animes", "mal://1", "mal", "19")       # live
+    store.set_binding("Animes", "mal://5", "mal", "50")       # a GUID key, not reached yet
+    store.set_binding("Animes", "Monster", "mal", "19")       # what 2.3.0 stored
+
+    unseen = [c for c in run_doctor(path, store, check_taxonomy=False).checks
+              if c.id.startswith("pins-unseen")]
+    assert [(c.id, c.items) for c in unseen] == [("pins-unseen:Animes", ["Monster"])]

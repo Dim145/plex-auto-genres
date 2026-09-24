@@ -171,9 +171,22 @@ machine-readable output.
 ```bash
 plex-auto-genres failures --library Animes        # see what could not be resolved
 plex-auto-genres query "Monster" --type anime     # find the right id
-plex-auto-genres bind Animes "Monster" mal 19     # pin it; clears the cached match
+plex-auto-genres bind Animes "Monster" mal 19     # pin it; the next run uses it
 plex-auto-genres run --library Animes
 ```
+
+`bind` and `unbind` take the item the way `manual` does: a title as Plex shows it
+(add the year when two items share it), looked up in what the runs have cached, or
+the item's key as `failures` and the console show it, such as `mal://1234`. Most items
+are keyed by the GUID Plex gave them, so a title is never stored as the key: it would
+match nothing, and the pin would be ignored without a word. A title no run has seen is
+refused, and so is one known only from v1's progress files: run the library once, or
+give the key.
+
+Before this version, `bind` did store the typed title as the key, and such a pin was
+never applied to an item Plex knows by a GUID. `doctor` lists them, `bindings` marks
+them "no run has seen this key": `unbind` one by that exact key, then bind the item
+again by title.
 
 An item can pin **one id per source**, which is what a merged library needs: a series
 that exists on both AniList and TMDB names its id on each, and each source is then

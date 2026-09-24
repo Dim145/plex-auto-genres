@@ -110,16 +110,21 @@ def test_states_for_library_and_forget(store: Store):
     states = store.states_for_library("Lib")
     assert states["mal://1"].status == "ok" and states["mal://2"].status == "failed"
     assert (states["mal://1"].provider, states["mal://1"].provider_id) == ("jikan", "1")
-    assert store.forget("Lib", "mal://2") is True and store.forget("Lib", "mal://2") is False
-    assert "mal://2" not in store.states_for_library("Lib")
+    assert store.forget("Lib", "mal://2") is True and store.forget("Lib", "mal://9") is False
+    # Kept, stale: the row is where the CLI finds the item by title.
+    assert Store.needs_work(store.states_for_library("Lib")["mal://2"], "f")
 
 
-def test_deleting_a_binding_also_drops_the_cached_match(store: Store):
+def test_deleting_a_binding_leaves_the_match_it_made_stale(store: Store):
+    from plex_auto_genres.models import stamp_pins
+
     store.set_binding("Lib", "mal://1", "mal", "19")
-    store.record_success("Lib", "mal://1", fingerprint="f", title="A", year=None, rating_key=1,
-                         genres=["Drama"], provider="jikan", provider_id="19")
+    store.record_success("Lib", "mal://1", fingerprint=stamp_pins("f", ["mal://19"]), title="A",
+                         year=None, rating_key=1, genres=["Drama"], provider="jikan",
+                         provider_id="19")
     assert store.delete_binding("Lib", "mal://1") is True
-    assert store.get_state("Lib", "mal://1") is None
+    state = store.get_state("Lib", "mal://1")
+    assert state is not None and Store.needs_work(state, "f"), "made through the pin: stale"
 
 
 # -- API: items ------------------------------------------------------------------
@@ -192,7 +197,7 @@ def test_forget_clears_one_cache_entry(browser):
     store.record_success("Animes", "mal://1", fingerprint="f", title="One", year=2001, rating_key=1,
                          genres=[], provider=None, provider_id=None)
     assert c.post("/api/v1/libraries/Animes/items/forget", params={"media_key": "mal://1"}).json() == {"forgotten": True}
-    assert c.get("/api/v1/libraries/Animes/items").json()["counts"]["ok"] == 0
+    assert Store.needs_work(store.get_state("Animes", "mal://1"), "f"), "retried on the next run"
 
 
 # -- API: search ------------------------------------------------------------------
@@ -240,7 +245,7 @@ def test_binding_round_trip_through_the_api(browser):
         "note": "hand-picked"})
     assert created.status_code == 201
     assert created.json()["provider_id"] == "19" and created.json()["note"] == "hand-picked"
-    assert store.get_state("Animes", "mal://1") is None       # stale match dropped
+    assert store.get_state("Animes", "mal://1") is not None   # kept; the pin makes it stale
 
     items = {i["title"]: i for i in c.get("/api/v1/libraries/Animes/items").json()["items"]}
     assert items["One"]["match"] == "binding"
@@ -450,3 +455,16 @@ def test_a_handed_back_item_is_not_shown_as_set_by_hand(browser):
     page = c.get("/api/v1/libraries/Animes/items").json()
     two = next(i for i in page["items"] if i["media_key"] == "mal://2")
     assert two["match"] != "manual" and two["manual"] is None
+
+
+def test_bindings_list_under_the_name_the_runs_cached(browser):
+    c, _, store = browser
+    store.record_success("Animes", "mal://2", fingerprint="f", title="Two", year=2002,
+                         rating_key=2, genres=[], provider="jikan", provider_id="2")
+    made = c.post("/api/v1/bindings", json={"library": "Animes", "media_key": "mal://2",
+                                            "provider": "mal", "provider_id": "19"})
+    assert made.status_code == 201 and made.json()["title"] == "Two (2002)"
+    c.post("/api/v1/bindings", json={"library": "Animes", "media_key": "mal://7",
+                                     "provider": "mal", "provider_id": "70"})
+    listed = {b["media_key"]: b["title"] for b in c.get("/api/v1/bindings").json()}
+    assert listed == {"mal://2": "Two (2002)", "mal://7": None}, "no run has seen mal://7"
