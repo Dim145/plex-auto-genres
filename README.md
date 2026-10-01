@@ -35,13 +35,13 @@ published — `OWNER` below stands for that account. Every release publishes
 tightly as its owner wants (`latest` skips pre-releases).
 
 ```bash
-mkdir -p plex-auto-genres/{config,logs} && cd plex-auto-genres
+mkdir -p plex-auto-genres/config && cd plex-auto-genres
 cp /path/to/checkout/config/config.json.example config/config.json
 $EDITOR config/config.json     # library names must match Plex exactly
 ```
 
 ```bash
-docker run --rm -v "$PWD/config:/config" -v "$PWD/logs:/logs" -e PLEX_BASE_URL="http://192.168.1.10:32400" -e PLEX_TOKEN="xxxx" ghcr.io/OWNER/plex-auto-genres doctor
+docker run --rm -v "$PWD/config:/config" -e PLEX_BASE_URL="http://192.168.1.10:32400" -e PLEX_TOKEN="xxxx" ghcr.io/OWNER/plex-auto-genres doctor
 ```
 
 Once `doctor` is happy, use the [compose file](docker/docker-compose.yml):
@@ -52,6 +52,15 @@ docker compose up -d
 
 The image is published for **linux/amd64 and linux/arm64** (Raspberry Pi, ARM Synology,
 Apple Silicon).
+
+**Everything that has to survive is in `/config`**: `config.json` and, beside it,
+`plex-auto-genres.db` — the bindings, the genres decided by hand, the cache, the run
+history and the snapshots that let a run be undone. The bindings and the decisions exist
+nowhere else, so keep that directory on real storage (never a temporary or cleaned
+location) and in your backups. No other volume is needed; `/posters` is only read. The
+container checks at every start, and warns when `/config` would not survive: only
+`config.json` mounted into it, or a temporary filesystem. Outside Docker the same holds:
+the database sits beside the config file unless `--db` points elsewhere.
 
 ### Locally
 
@@ -91,7 +100,7 @@ plex-auto-genres serve --host 0.0.0.0           # reachable from the LAN
 | `PAG_WEB_SECURE_COOKIE` | auto | Force the cookie's `Secure` flag (behind an https proxy) |
 | `PAG_WEB_TRUSTED_PROXIES` | — | Comma-separated proxy addresses whose `X-Forwarded-For` is believed for the login rate limit |
 | `CRON_SCHEDULE` | `0 1 * * *` | Fallback schedule. The `schedule` block in `config.json` — editable on the Config page, where it can also be paused — takes precedence |
-| `PUID` / `PGID` | `1000` | The user the app runs as; the container hands `/config` and `/logs` to it on start |
+| `PUID` / `PGID` | `1000` | The user the app runs as; the container hands `/config` to it on start |
 | `TZ` | `UTC` | The timezone cron expressions are read in: `0 1 * * *` means 01:00 local |
 
 The API is documented at `/api/docs` once signed in.
@@ -399,6 +408,42 @@ agree with MyAnimeList and AniList, which are English-only.
 
 ---
 
+## Upgrading from 2.4 or older
+
+Versions up to 2.4 kept the database in `/logs` (`logs/` under the working directory
+outside Docker). Stop the old container, then start the new one with that mount still in
+place: the database moves to `/config` by itself — copied through SQLite, so whatever the
+last run left in its WAL comes along, and checked before use — and the log says so:
+
+```
+Moved the state database from /logs/plex-auto-genres.db to /config/plex-auto-genres.db, beside the config; nothing is written to /logs any more. The old file is kept as plex-auto-genres.db.moved.
+```
+
+After that the `/logs` mount can go, and so can the `.moved` file once your bindings and
+decisions show up.
+
+These stop the start rather than let an empty database take over:
+
+- the old database is still open in another process — the previous container still
+  running, say: stop it, then start again;
+- it cannot be read or copied, or the copy does not check out. SQLite writes beside a
+  database to open it, so a `/logs` the app cannot write — a `:ro` mount included —
+  counts;
+- whatever sits at `/config/plex-auto-genres.db` is not one of this app's databases;
+- `/config` would not keep it: only `config.json` is mounted into it, or it is on a
+  temporary filesystem such as the host's `/tmp`. The container warns about that at every
+  start, old database or not.
+
+A database that `/config` gained before `/logs` was mounted — from a `doctor` run, say —
+gives way as long as nothing has been kept in it yet. One that holds anything never does:
+the log names both, with what each holds, and how to keep the older one instead. If the
+old file cannot be renamed once copied, the move still counts and the log says the old
+file is no longer read. A `PAG_DB=/logs/plex-auto-genres.db` that a tool carried over
+from 2.4's settings is read as unset, and the log says so.
+
+Going back to 2.4 afterwards means pointing it at the moved database:
+`PAG_DB=/config/plex-auto-genres.db` (`--db config/plex-auto-genres.db` outside Docker).
+
 ## Upgrading from v1
 
 Pull the new image (or `pip install -U`) and keep your volumes and environment as they
@@ -419,7 +464,7 @@ What that means, step by step:
 - **`config.json`** is rewritten in the v2 layout; the v1 file stays next to it as
   `config.json.v1` (a second upgrade never overwrites it). v1's per-*type* rules become
   the type defaults, so behaviour is unchanged; per-library overrides are opt-in.
-- **`logs/plex-<type>-*.txt`** progress files are imported into `logs/plex-auto-genres.db`
+- **`logs/plex-<type>-*.txt`** progress files are imported into the database
   for every configured library of that type, then renamed `*.imported`. Items keep
   their "done" status; as each library is read they are re-keyed by Plex GUID so a
   renamed file no longer orphans them. The rating and rating-collection progress files
@@ -430,9 +475,10 @@ What that means, step by step:
   UI on, `CRON_SCHEDULE` / `TZ` / `RUN_ON_START` tune the nightly pass, `PUID` / `PGID`
   pick the user the app runs as.
 - **Ownership**: the v1 image ran as root; this one runs the app as `PUID:PGID`
-  (default `1000:1000`). PID 1 starts as root only to hand `/config` and `/logs` to that
-  user — the two directories the app writes, non-recursively and never through a
-  symlink — and then drops privileges for everything, the healthcheck included.
+  (default `1000:1000`). PID 1 starts as root only to hand `/config` (and `/logs`, while
+  it holds what an older version left to carry over) to that user — non-recursively and
+  never through a symlink — and then drops privileges for everything, the healthcheck
+  included.
   `PUID=0` keeps everything as root, as v1 did. If you pin the container to a user
   (`user:` in compose, `runAsUser` in Kubernetes) it cannot do that, so it tells you
   what to run once instead:

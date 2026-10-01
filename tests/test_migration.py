@@ -241,3 +241,21 @@ def test_the_legacy_logs_directory_falls_back_to_logs(tmp_path, monkeypatch):
     # ...and files next to the database win.
     (elsewhere / "plex-anime-failures.txt").write_text("[]")
     assert legacy_logs_dir(elsewhere / "state.db") == elsewhere
+
+
+def test_a_logs_directory_holding_only_the_v1_log_is_still_found(tmp_path, monkeypatch, caplog):
+    # The database moved beside the config, so logs/ is no longer "next to it":
+    # the note about v1's leftovers must still find them there.
+    from plex_auto_genres.migration import legacy_logs_dir
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "plex-auto-genres-automate.log").write_text("old log")
+    config = tmp_path / "config" / "config.json"
+    config.parent.mkdir()
+    config.write_text(json.dumps({"version": 2, "libraries": []}))
+
+    with Store(config.parent / "state.db") as store, caplog.at_level(logging.INFO):
+        report = migrate_install(config, legacy_logs_dir(config.parent / "state.db"), store)
+
+    assert any("plex-auto-genres-automate.log" in note for note in report.notes)

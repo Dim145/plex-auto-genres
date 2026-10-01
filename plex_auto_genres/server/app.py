@@ -17,8 +17,9 @@ from fastapi.staticfiles import StaticFiles
 from .. import __version__
 from ..errors import PagError
 from ..jobs import JobOptions
-from ..migration import legacy_logs_dir, migrate_install
+from ..migration import legacy_logs_dir, migrate_install, relocate_database
 from ..scheduler import Scheduler
+from ..store import default_db_path
 from .auth import AuthMiddleware, AuthRuntime, AuthSettings
 from .auth import router as auth_router
 from .routes import router
@@ -50,7 +51,7 @@ def resolve_static_dir(explicit: str | Path | None = None) -> Path | None:
 
 def create_app(
     config_path: str | Path = "config/config.json",
-    db_path: str | Path = "logs/plex-auto-genres.db",
+    db_path: str | Path | None = None,
     *,
     cron: str | None = None,
     run_on_start: bool = False,
@@ -64,18 +65,21 @@ def create_app(
     config file's ``schedule`` block overrides it and can pause it, live.
     ``auth`` defaults to the environment (``PAG_WEB_PASSWORD`` & co). With no
     password the API is open; :func:`auth.check_bind` is what stops that from
-    reaching a non-loopback interface unannounced.
+    reaching a non-loopback interface unannounced. Without ``db_path`` the
+    database is the one beside the config file.
     """
     auth_settings = auth if auth is not None else AuthSettings.from_env()
+    db_file = Path(db_path) if db_path is not None else default_db_path(config_path)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        state = AppState(config_path, db_path, posters_dir=posters_dir)
-        app.state.pag = state
         # An embedder (or the demo) starting straight from create_app() gets
-        # the same v1 upgrade the CLI performs before it hands over.
+        # the same upgrade the CLI performs before it hands over.
+        relocate_database(db_file, config_path)
+        state = AppState(config_path, db_file, posters_dir=posters_dir)
+        app.state.pag = state
         try:
-            migrate_install(config_path, legacy_logs_dir(db_path), state.store)
+            migrate_install(config_path, legacy_logs_dir(db_file), state.store)
         except OSError as exc:
             log.error("Could not complete the v1 upgrade (%s); continuing without it", exc)
         app.state.auth = AuthRuntime.build(auth_settings, state.store)

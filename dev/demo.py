@@ -378,7 +378,6 @@ def seed(data: Path, sections: list[Section]) -> None:
     from plex_auto_genres.store import Store
 
     (data / "config").mkdir(parents=True, exist_ok=True)
-    (data / "logs").mkdir(exist_ok=True)
     (data / "config" / "config.json").write_text(CONFIG_TEXT, encoding="utf-8")
     for type_, names in (("standard-tv", ["action", "drama"]), ("anime", ["action", "comedy"])):
         folder = data / "posters" / type_
@@ -391,7 +390,7 @@ def seed(data: Path, sections: list[Section]) -> None:
     now = time.time()
     plex = FakePlex(sections, BASE_URL)
 
-    with Store(data / "logs" / "state.db") as store:
+    with Store(data / "config" / "state.db") as store:
         # Offline caches, so neither doctor nor the AniDB mapper touch the network.
         store.kv_set("mal_taxonomy_v1", json.dumps(sorted([*ANIME_GENRES, "Racing", "Suspense"])),
                      30 * 86400)
@@ -555,7 +554,7 @@ def main() -> int:
     sections = build_sections()
     if args.reset and args.data.exists():
         shutil.rmtree(args.data)
-    fresh = not (args.data / "logs" / "state.db").exists()
+    fresh = not (args.data / "config" / "state.db").exists()
     if fresh:
         seed(args.data, sections)
 
@@ -567,7 +566,7 @@ def main() -> int:
         print("The UI is not built: run `pnpm --dir ui build` first (the API still works).", file=sys.stderr)
 
     app = create_app(
-        args.data / "config" / "config.json", args.data / "logs" / "state.db",
+        args.data / "config" / "config.json", args.data / "config" / "state.db",
         cron="0 3 * * *", posters_dir=args.data / "posters",
         static_dir=static if (static / "index.html").is_file() else None,
         auth=AuthSettings(password=args.password or None, insecure=not args.password),

@@ -11,6 +11,8 @@ __pycache__
 tests
 logs
 config/config.json
+config/*.db*
+config/.*.partial*
 .env
 *.md
 !README.md

@@ -7,9 +7,14 @@ the data layer a web UI will need:
 
 ``media_state``  per-library processing cache, invalidated by settings changes
 ``bindings``     manual "this Plex item IS that provider id" overrides
+``manual_tags``  genres a person decided for an item
 ``snapshots``    previous tag values, so a run can be undone
 ``runs``         run history with counters
 ``kv``           small cached blobs (the AniDB mapping table, taxonomy, ...)
+
+The file lives beside ``config.json`` (:func:`default_db_path`): bindings and
+decisions are made by hand and exist nowhere else, so the database is kept,
+moved and backed up with the config rather than with anything disposable.
 """
 
 from __future__ import annotations
@@ -33,6 +38,14 @@ from .models import ExternalId, ManualTags, RunReport
 log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 4
+
+DB_FILENAME = "plex-auto-genres.db"
+
+
+def default_db_path(config_path: str | Path) -> Path:
+    """Where the database goes when no path is given: beside the config file."""
+    return Path(config_path).parent / DB_FILENAME
+
 
 #: Columns added after the first release, applied with ALTER TABLE on open.
 _ADDED_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
@@ -262,7 +275,7 @@ class Store:
     Contention is irrelevant at this scale; the writes are sub-millisecond.
     """
 
-    def __init__(self, path: str | Path = "logs/plex-auto-genres.db") -> None:
+    def __init__(self, path: str | Path = Path("config") / DB_FILENAME) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()

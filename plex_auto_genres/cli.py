@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import shlex
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -25,7 +26,7 @@ from .config import (
 )
 from .doctor import DoctorReport, run_doctor
 from .errors import ConfigError, PagError, PlexConnectionError
-from .migration import legacy_logs_dir, migrate_install
+from .migration import legacy_logs_dir, migrate_install, relocate_database
 from .models import (
     ManualTags,
     MediaType,
@@ -40,12 +41,11 @@ from .providers import LookupRequest, bindable_schemes, build_providers
 from .reporting import ProgressBar, Style, print_report
 from .runner import ACTIONS, run_libraries
 from .scheduler import SchedulePlan, Scheduler, validate_cron
-from .store import Store, run_status
+from .store import DB_FILENAME, Store, default_db_path, run_status
 
 log = logging.getLogger("plex_auto_genres")
 
 DEFAULT_CONFIG = "config/config.json"
-DEFAULT_DB = "logs/plex-auto-genres.db"
 
 
 # --------------------------------------------------------------------------
@@ -124,7 +124,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--config", default=DEFAULT_CONFIG, help="Path to config.json.")
-    parser.add_argument("--db", default=DEFAULT_DB, help="Path to the state database.")
+    parser.add_argument("--db", help=f"Path to the state database (default: {DB_FILENAME} "
+                                     "beside the config file).")
     parser.add_argument("-v", "--verbose", action="count", default=0, help="-v info, -vv debug.")
     parser.add_argument("--json", action="store_true", help="Emit machine-readable output.")
 
@@ -885,6 +886,16 @@ def _dispatch(args, store: Store, style: Style) -> int:
     return asyncio.run(cmd_run(args, config, store, style))
 
 
+def _open_store(path: str) -> Store:
+    try:
+        return Store(path)
+    except (sqlite3.Error, OSError) as exc:
+        raise PagError(
+            f"Cannot open the state database at {path} ({exc}). It lives beside the config "
+            "file, so that directory must be writable by this user; --db puts it elsewhere."
+        ) from exc
+
+
 def main(argv: list[str] | None = None) -> int:
     """Parse the command line and dispatch. Returns the process exit code."""
     load_dotenv()
@@ -905,7 +916,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "migrate-config":
             return cmd_migrate_config(args.config, args.out, style)
 
-        with Store(args.db) as store:
+        if args.db is None:
+            args.db = str(default_db_path(args.config))
+        # Before anything opens it: an install from 2.4 or older still has it in logs/.
+        relocate_database(args.db, args.config)
+        with _open_store(args.db) as store:
             return _dispatch(args, store, style)
 
     except KeyboardInterrupt:

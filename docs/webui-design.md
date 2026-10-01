@@ -832,6 +832,64 @@ a list fixed from the listing would have dropped the tags nobody saw. Items writ
 an earlier version keep their hidden tags until they are written again; a forced run
 of the library cleans them.
 
+### The database beside the config — done
+
+Reported: every binding and every genre decided by hand vanished, while the libraries
+and their rules stayed. The volume behind `/logs` lived in the host's `/tmp`; the
+machine restarted after an update, Docker recreated the directory empty, and the app
+opened a new database there without a word. The fault was ours, not the volume's: the
+database, the only copy of what people decided, sat in a directory whose name says it
+can be thrown away, and the image made that directory a second mount to get right.
+The rules and per-library overrides survived because they are in `config.json`.
+
+Persistent state now has one home:
+
+* The database is `plex-auto-genres.db` beside the config file, by default and in the
+  image, where `PAG_DB` is derived from `PAG_CONFIG` unless set. `--db` still points
+  anywhere. `/config` is the one volume the compose file needs; `/posters` stays
+  optional and read-only.
+* An install from 2.4 or older is carried over on the first start, before anything
+  opens the database: copied with SQLite's backup API (so what only the WAL held, as a
+  killed container leaves it, comes along) while holding the old file alone, left in
+  rollback-journal mode so the copy is self-contained, checked with `quick_check`, given
+  the old file's permissions, published with a hard link that cannot replace a
+  database already there, and the old file renamed `.moved` so nothing reads it by
+  mistake. The image names the old place (`PAG_LEGACY_DB`), so a different working
+  directory does not hide it.
+* Whatever stops the move stops the start, with the reason: an old database still open
+  in another process (the previous container still running -- every open WAL
+  connection holds a shared lock, so the exclusive one is refused), one that cannot be
+  read or copied, a copy that does not check out, a `logs/` the app cannot look into.
+  An empty one never takes its place silently: that is the failure being fixed.
+* An empty database already beside the config -- a `doctor` run before `/logs` was
+  mounted makes one -- gives way, as long as nothing has been kept in it. One that
+  holds anything is never touched; the log names both, with what each holds, and how to
+  keep the older one. The same file reached through two mounts is recognised as one,
+  and a WAL left by a database file that is gone is set aside before SQLite can replay
+  it onto the copy.
+* A database chosen by hand stays where it points, and the log says why the old one was
+  not moved; `PAG_DB` set to 2.4's own default is read as unset. A file at the default
+  place that is not one of this app's databases stops the start rather than gain its
+  tables.
+* The entrypoint no longer requires `/logs`. It hands it over only while it holds
+  something to carry over (the old database, v1's progress files), and the ownership
+  message names the owner it found instead of guessing an older version. It refuses
+  paths that are relative or resolve to `/` (they made the image root the directory
+  handed over), and it reads the mount table at every start: a `/config` that would not survive -- only `config.json`
+  mounted into it, a tmpfs, a directory under the host's `/tmp` -- is reported, and
+  stops the start while an old database waits in `/logs` to move there.
+
+Reviewed before release by four independent passes (the Python move line by line, the
+container paths, removed behaviour and callers, docs and tests), each reproducing what
+it reported, then a fifth that looked only for what the fixes themselves broke.
+Twenty-five defects were fixed, among them the empty database that won over the old one
+(a zero-byte file included), the delete advice about a file mounted twice, the move into
+a container's throwaway layer, the move from under a still-running container, a stale
+WAL replayed onto the copy, partial copies colliding across PID namespaces, a 2.4
+`PAG_DB` carried over by a container-recreating tool, and paths such as `/config/..`
+that handed the image root to the app user. One pre-existing problem was left for its
+own change: `PUID`/`PGID` with a leading zero are read as octal.
+
 ### Next
 
 Decide where secrets should live if they are ever to be edited from the UI — the

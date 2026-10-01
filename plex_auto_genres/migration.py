@@ -1,5 +1,11 @@
 """One-time upgrade steps, run at startup and narrated in the log.
 
+Up to 2.4 the database sat in ``logs/`` (``/logs`` in the image), a directory
+that looks disposable and is treated so: mounted from ``/tmp``, cleaned, left
+out of backups. It holds the bindings and the genres decided by hand, which
+exist nowhere else, so it now lives beside the config, and
+:func:`relocate_database` carries an existing one there on the first start.
+
 A v1 install is recognised by its *shape*, not by a version number:
 
 * ``config.json`` carrying v1's ``general_settings`` / ``automation_settings``
@@ -21,9 +27,15 @@ failed upgrade degrades to the old behaviour instead of killing the process.
 
 from __future__ import annotations
 
+import contextlib
+import functools
 import json
 import logging
+import os
 import shutil
+import sqlite3
+import stat
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,10 +43,27 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from .config import AppConfig, is_v1_layout, load_config, migrate_v1, write_config
+from .errors import PagError
 from .models import MediaType
-from .store import Store
+from .store import DB_FILENAME, Store, default_db_path
 
 log = logging.getLogger(__name__)
+
+#: Where the database went before it moved beside the config: ``logs/`` under
+#: the working directory. The image names the exact place (``PAG_LEGACY_DB``),
+#: so a container given another working directory still finds it.
+LEGACY_DB = Path("logs") / DB_FILENAME
+
+#: Seconds to wait on a database another process holds before saying so.
+LOCK_WAIT_S = 2.0
+
+#: The tables whose rows are worth keeping. A database with none in any of
+#: them is empty in every way that matters, whatever its kv cache holds.
+_KEPT = {"bindings": "binding", "manual_tags": "decision made by hand",
+         "media_state": "cached item", "runs": "run", "snapshots": "snapshot"}
+
+#: The files SQLite keeps beside a database while it is in use.
+_COMPANIONS = ("-wal", "-shm", "-journal")
 
 #: v1 wrote these too; v2 derives what they held from its own cache.
 _UNUSED_V1_FILES = (
@@ -66,15 +95,16 @@ class MigrationReport:
 def legacy_logs_dir(db_path: str | Path) -> Path:
     """Where v1 left its progress files: next to the database, else ``logs/``.
 
-    v1 always wrote them to ``logs/`` relative to its working directory, and
-    that is also where v2 puts its database by default -- but a ``--db``
-    elsewhere must not make the files invisible.
+    v1 always wrote them to ``logs/`` relative to its working directory. The
+    database no longer lives there, so that is where to look unless files
+    sit next to the database itself.
     """
     beside_db = Path(db_path).parent
     if any(beside_db.glob("plex-*-successful.txt")) or any(beside_db.glob("plex-*-failures.txt")):
         return beside_db
-    fallback = Path("logs")
-    if fallback.is_dir() and any(fallback.glob("plex-*.txt")):
+    fallback = legacy_db().parent
+    if fallback.is_dir() and (any(fallback.glob("plex-*.txt"))
+                              or (fallback / "plex-auto-genres-automate.log").is_file()):
         return fallback
     return beside_db
 
@@ -94,6 +124,287 @@ def migrate_install(config_path: str | Path, logs_dir: str | Path, store: Store)
     _import_progress_files(logs_dir, config, store, report)
     _note_unused_files(logs_dir, report)
     return report
+
+
+# -- the database -------------------------------------------------------------
+
+
+class _InUse(Exception):
+    """Another process has this database open."""
+
+
+def legacy_db() -> Path:
+    """Where an install from 2.4 or older keeps its database."""
+    return Path(os.environ.get("PAG_LEGACY_DB") or LEGACY_DB)
+
+
+def relocate_database(db_path: str | Path, config_path: str | Path) -> Path | None:
+    """Carry the database from ``logs/`` to its place beside the config.
+
+    Runs before anything opens the database, and fills only the default
+    location: a ``--db`` chosen by hand is left where it points, and the log
+    says why the old database stayed. The copy goes through SQLite, so what
+    only the WAL held comes along, and is checked before anything reads it.
+    An empty database already beside the config -- one that a command run
+    before ``logs/`` was mounted created -- gives way to the old one; one
+    with anything in it never does, and the log names both.
+
+    Whatever stops the move stops the start: an old database still open in
+    another process, one that cannot be read or copied. Opening an empty one
+    in its place is how bindings and decisions vanish without a word.
+
+    Returns where the old file was kept, renamed -- None when nothing moved,
+    or when the old file could not be renamed (the log then says so).
+    """
+    target = Path(db_path).resolve()
+    legacy = legacy_db().resolve()
+    chosen = target != default_db_path(config_path).resolve()
+    try:
+        legacy.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError as exc:
+        if chosen:
+            return None  # nothing would move anyway: --db names the database in use
+        raise PagError(
+            f"Cannot look into {legacy.parent} ({exc}), where an older version kept the "
+            "database. Make it readable by the user the app runs as, or remove that mount "
+            "if nothing of yours is in it."
+        ) from exc
+    if _same_file(legacy, target):
+        return None  # one directory mounted at both places: nothing to move
+    held = _contents(target)
+    if chosen:
+        if not held or not any(held.values()):
+            log.warning("An older state database is at %s, but this install uses %s, chosen "
+                        "with --db or PAG_DB, so it was not moved. Move it there yourself, "
+                        "with its -wal and -shm files, if it holds your bindings.",
+                        legacy, target)
+        return None
+    if held and "unknown" in held:
+        raise PagError(
+            f"{target} is not one of this app's databases, or cannot be read, so the one at "
+            f"{legacy} cannot move in. Move that file away, then start again."
+        )
+    if held and any(held.values()):
+        log.warning("Two state databases: this install uses %s (%s). The older %s (%s) is no "
+                    "longer read. To keep the older one instead, stop the app, delete %s and "
+                    "its -wal and -shm files, and start again: it then moves in.",
+                    target, _describe(held), legacy, _describe(_contents(legacy)), target.name)
+        return None
+
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if held is not None:
+            _clear_empty(target)
+        _set_orphans_aside(target)
+        partial = _copy_database(legacy, target)
+        if not _publish(partial, target):
+            return None  # another process carried it over first; that copy stands
+    except _InUse as exc:
+        raise PagError(
+            f"The state database at {exc} is open in another process -- most likely a "
+            "container still running the previous version. Stop it, then start again: the "
+            "database moves beside the config once nothing has it open."
+        ) from exc
+    except (sqlite3.Error, OSError) as exc:
+        if target.exists() and not legacy.exists():
+            return None  # another process moved it while this one was trying
+        raise PagError(
+            f"The state database at {legacy} could not be moved to {target} ({exc}). Nothing "
+            "was changed. Make both directories writable by the user the app runs as, or move "
+            "the file there by hand, with its -wal and -shm files, while the app is stopped. "
+            "--db (PAG_DB) can also keep using it where it is."
+        ) from exc
+
+    _sync_directory(target.parent)
+    kept = _retire(legacy)
+    log.info("Moved the state database from %s to %s, beside the config; nothing is "
+             "written to %s any more.%s", legacy, target, legacy.parent,
+             f" The old file is kept as {kept.name}." if kept else "")
+    return kept
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+def _contents(path: Path) -> dict[str, int] | None:
+    """How many rows worth keeping a database holds; None when there is no file.
+
+    Anything that cannot be read as one of ours counts as holding something,
+    so that nothing here ever deletes or shadows it.
+    """
+    if not path.exists():
+        return None
+    try:
+        with contextlib.closing(sqlite3.connect(path, timeout=LOCK_WAIT_S)) as conn:
+            tables = {row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'")}
+            if not tables:
+                return {}  # what SQLite makes of a zero-byte file: an empty database
+            if "meta" not in tables:
+                return {"unknown": 1}
+            # Table names come from the constant above, not from input.
+            return {table: conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]  # nosec B608
+                    for table in _KEPT if table in tables}
+    except sqlite3.Error:
+        return {"unknown": 1}
+
+
+def _describe(counts: dict[str, int] | None) -> str:
+    if not counts:
+        return "nothing"
+    if "unknown" in counts:
+        return "not readable as one of this app's databases"
+    held = [f"{n} {_KEPT[table]}{'' if n == 1 else 's'}"
+            for table, n in counts.items() if n and table in _KEPT]
+    return ", ".join(held) or "nothing"
+
+
+def _exclusive(path: Path) -> sqlite3.Connection:
+    """Open ``path`` alone, or raise _InUse when another process has it open.
+
+    In WAL mode every open connection keeps a shared lock on the database
+    file, so the exclusive lock taken here is granted only when nothing else
+    reads or writes it -- not even an idle server -- and it lasts until this
+    connection closes. mode=rw: a file that vanished meanwhile must fail,
+    not come back empty.
+    """
+    conn = sqlite3.connect(f"{path.as_uri()}?mode=rw", uri=True, timeout=LOCK_WAIT_S)
+    try:
+        conn.execute("PRAGMA locking_mode=EXCLUSIVE")
+        conn.execute("BEGIN EXCLUSIVE")
+        conn.execute("ROLLBACK")
+    except sqlite3.OperationalError as exc:
+        conn.close()
+        if getattr(exc, "sqlite_errorname", "") in ("SQLITE_BUSY", "SQLITE_LOCKED"):
+            raise _InUse(str(path)) from exc
+        raise
+    except BaseException:
+        conn.close()
+        raise
+    return conn
+
+
+def _clear_empty(target: Path) -> None:
+    """Delete an empty database that stands where the old one goes."""
+    with contextlib.closing(_exclusive(target)) as conn:
+        for table in _KEPT:
+            with contextlib.suppress(sqlite3.OperationalError):  # a table it predates
+                # Table names come from the constant above, not from input.
+                if conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():  # nosec B608
+                    raise sqlite3.DatabaseError(f"{target} is no longer empty")
+    for suffix in ("", *_COMPANIONS):
+        target.with_name(target.name + suffix).unlink(missing_ok=True)
+    log.info("Removed the empty database at %s: it was made before the older one could "
+             "be seen, which takes its place.", target)
+
+
+def _set_orphans_aside(target: Path) -> None:
+    """Rename a WAL or journal left behind by a database file that is gone.
+
+    SQLite would replay it onto the copy published under the same name.
+    """
+    for suffix in _COMPANIONS:
+        orphan = target.with_name(target.name + suffix)
+        if orphan.exists():
+            kept = _fresh_name(orphan.with_name(orphan.name + ".orphaned"))
+            orphan.replace(kept)
+            log.warning("Set %s aside as %s: its database file is gone, and it would "
+                        "otherwise be replayed onto the one moving in.", orphan.name, kept.name)
+
+
+def _copy_database(source: Path, target: Path) -> Path:
+    """Copy ``source`` into a new file beside ``target``, checked; returns that file.
+
+    Through SQLite's backup API, holding the source alone: consistent, WAL
+    included, and refused while another process has it open. The copy is
+    left in rollback-journal mode, self-contained, with nothing of it in a
+    -wal that its published name would not carry.
+    """
+    fd, name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".partial")
+    os.close(fd)
+    partial = Path(name)
+    try:
+        # mkstemp makes it private; keep the permissions the old file had, so
+        # that whatever could read it (a backup job, say) still can. Some
+        # filesystems (FAT) keep none, and refuse to be told.
+        with contextlib.suppress(OSError):
+            partial.chmod(stat.S_IMODE(source.stat().st_mode))
+        with contextlib.closing(_exclusive(source)) as src, \
+                contextlib.closing(sqlite3.connect(partial)) as dst:
+            src.backup(dst, progress=functools.partial(_refuse_to_wait, source))
+            dst.execute("PRAGMA journal_mode=DELETE")
+            verdict = dst.execute("PRAGMA quick_check").fetchone()[0]
+        if verdict != "ok":
+            raise sqlite3.DatabaseError(f"the copy does not check out: {verdict}")
+    except BaseException:
+        for suffix in ("", *_COMPANIONS):
+            partial.with_name(partial.name + suffix).unlink(missing_ok=True)
+        raise
+    for suffix in _COMPANIONS:
+        partial.with_name(partial.name + suffix).unlink(missing_ok=True)
+    return partial
+
+
+def _refuse_to_wait(source: Path, status: int, _remaining: int, _total: int) -> None:
+    """Backup progress: sqlite3 retries a busy source forever; a start never waits on it."""
+    if status in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+        raise _InUse(str(source))
+
+
+def _publish(partial: Path, target: Path) -> bool:
+    """Put the copy in place unless a database is already there.
+
+    A hard link fails when the target exists, so two processes starting at
+    once can never have the later one replace a database the earlier one is
+    already writing to.
+    """
+    try:
+        os.link(partial, target)
+    except FileExistsError:
+        return False
+    except OSError:  # a filesystem without hard links
+        if target.exists():
+            return False
+        partial.replace(target)
+        return True
+    finally:
+        with contextlib.suppress(OSError):
+            partial.unlink(missing_ok=True)
+    return True
+
+
+def _sync_directory(directory: Path) -> None:
+    """Make a rename in ``directory`` durable before the next step relies on it."""
+    with contextlib.suppress(OSError):  # not every platform opens directories
+        fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+def _retire(legacy: Path) -> Path | None:
+    """Rename the old file so nothing opens it by mistake; it stays as a backup."""
+    kept = _fresh_name(legacy.with_name(legacy.name + ".moved"))
+    try:
+        legacy.replace(kept)
+    except OSError as exc:
+        log.warning("Could not rename %s (%s). It is no longer read; delete it once "
+                    "everything is there.", legacy, exc)
+        return None
+    for suffix in _COMPANIONS:  # gone once SQLite closed it cleanly
+        companion = legacy.with_name(legacy.name + suffix)
+        with contextlib.suppress(OSError):
+            if companion.exists():
+                companion.replace(kept.with_name(kept.name + suffix))
+    _sync_directory(legacy.parent)
+    return kept
 
 
 # -- config.json --------------------------------------------------------------

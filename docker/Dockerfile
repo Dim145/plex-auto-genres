@@ -47,10 +47,14 @@ LABEL org.opencontainers.image.title="plex-auto-genres" \
       org.opencontainers.image.description="Tag Plex media with genres from TMDB, MyAnimeList or AniList" \
       org.opencontainers.image.licenses="MIT"
 
+# Everything that has to survive lives in /config: config.json and the
+# database beside it (bindings, genres decided by hand, cache, history);
+# PAG_DB puts the database elsewhere. PAG_LEGACY_DB is where versions up to
+# 2.4 kept it, so the first start can move it whatever the working directory.
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PAG_CONFIG=/config/config.json \
-    PAG_DB=/logs/plex-auto-genres.db \
+    PAG_LEGACY_DB=/logs/plex-auto-genres.db \
     PAG_POSTERS=/posters \
     PAG_STATIC_DIR=/app/static \
     PAG_WEB_PORT=8095 \
@@ -80,11 +84,13 @@ COPY docker/entrypoint.sh /entrypoint.sh
 COPY docker/healthcheck.sh /healthcheck.sh
 
 # The image deliberately declares no USER: PID 1 starts as root, hands the
-# mounted /config and /logs to PUID:PGID (v1 ran as root, so an upgraded
-# install's volumes belong to root) and immediately su-execs the app as that
-# user -- the pattern the *arr images use, and the only way an upgrade works
-# by pulling a tag. Run it with `user:` / runAsUser to skip the root phase;
-# the entrypoint then checks the volumes and tells you what to run once.
+# mounted /config to PUID:PGID (v1 ran as root, so an upgraded install's
+# volumes belong to root) and immediately su-execs the app as that user --
+# the pattern the *arr images use, and the only way an upgrade works by
+# pulling a tag. Run it with `user:` / runAsUser to skip the root phase; the
+# entrypoint then checks the volume and tells you what to run once. /logs is
+# used once, by an install upgraded from 2.4 or older: the database moves out
+# of it on the first start (see the entrypoint).
 # nosemgrep: dockerfile.security.missing-user.missing-user-entrypoint
 RUN adduser -S -u 1000 -h /home/pag pag \
  && chmod +x /entrypoint.sh /healthcheck.sh \
@@ -96,7 +102,7 @@ EXPOSE 8095
 
 HEALTHCHECK --interval=1m --timeout=15s --start-period=30s --retries=3 CMD ["/healthcheck.sh"]
 
-# No USER on purpose: PID 1 starts as root to hand the mounted volumes to
+# No USER on purpose: PID 1 starts as root to hand the mounted volume to
 # PUID:PGID (v1 ran as root, so an upgraded install's files belong to root)
 # and su-execs the app as that user straight away -- see the entrypoint. Pin
 # the container with `user:` / runAsUser to skip the root phase entirely.

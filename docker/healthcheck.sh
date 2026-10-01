@@ -14,6 +14,13 @@ if [ -z "$MODE" ]; then
     fi
 fi
 
+# Beside the config unless PAG_DB says otherwise, as the entrypoint has it --
+# the 2.4 default included, which it reads as unset.
+if [ "${PAG_DB:-}" = "${PAG_LEGACY_DB:-/logs/plex-auto-genres.db}" ]; then
+    PAG_DB=""
+fi
+PAG_DB="${PAG_DB:-$(dirname "$PAG_CONFIG")/plex-auto-genres.db}"
+
 if [ "$MODE" = "serve" ]; then
     wget -qO- "http://127.0.0.1:${PAG_WEB_PORT:-8095}/api/v1/auth/status" >/dev/null 2>&1
 elif [ "$(id -u)" = "0" ] && [ "${PUID:-1000}" != "0" ]; then

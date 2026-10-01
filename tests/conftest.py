@@ -10,6 +10,12 @@ from plex_auto_genres.models import ExternalId, MediaItem
 from plex_auto_genres.store import Store
 
 
+@pytest.fixture(autouse=True)
+def _no_image_paths(monkeypatch):
+    """The image names where an old database sits; tests run with the defaults."""
+    monkeypatch.delenv("PAG_LEGACY_DB", raising=False)
+
+
 class FakePlexItem:
     """Stands in for a plexapi video object, recording every edit payload."""
 

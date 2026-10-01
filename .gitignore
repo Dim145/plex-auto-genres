@@ -11,11 +11,14 @@ dist/
 .pytest_cache/
 .ruff_cache/
 
-# Runtime state: the SQLite database, run history and v1 progress files.
+# Where versions up to 2.4 kept the database, and v1 its progress files.
 logs/
 
-# Your real configuration. Only the .example is tracked.
+# Your real configuration, and the database that lives beside it. Only the
+# .example is tracked.
 config/config.json
+config/*.db*
+config/.*.partial*
 
 # Local compose overrides
 docker-compose.yml

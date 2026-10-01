@@ -7,8 +7,10 @@ services:
     ports:
       - "8095:8095"          # web UI + API; drop this block for a headless install
     volumes:
-      - ./config:/config     # must contain config.json
-      - ./logs:/logs         # state database and run history
+      # config.json and the database beside it: bindings, genres decided by
+      # hand, the cache and the run history. The one directory to keep and
+      # back up -- never a temporary or cleaned location.
+      - ./config:/config
       - ./posters:/posters   # optional, only needed for setPosters
     environment:
       # --- Plex (token auth is preferred; see the README for how to find it)
@@ -37,10 +39,14 @@ services:
       # --- Ownership of the mounted volumes (see the note below)
       PUID: "1000"
       PGID: "1000"
+# Upgrading from 2.4 or older, which kept the database in /logs: leave your
+# ./logs:/logs line in place for one start. The database moves to /config by
+# itself and the log says so; the line can go after that.
+
 # The app runs as PUID:PGID — set them in the environment block above; the
 # defaults are 1000:1000. On the first start the container hands the mounted
-# /config and /logs to that user, so volumes written by the v1 image (which ran
-# as root) keep working. PUID=0 keeps everything as root, as v1 did.
+# /config to that user, so a volume written by the v1 image (which ran as
+# root) keeps working. PUID=0 keeps everything as root, as v1 did.
 #
 # Adding a `user:` key here instead pins the container to that uid and disables
 # the hand-over; if the volumes are not already owned by it, run once:
