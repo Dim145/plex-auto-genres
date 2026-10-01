@@ -248,11 +248,11 @@ def test_the_image_names_where_the_old_database_is(install, tmp_path, monkeypatc
     assert not old.exists()
 
 
-def test_a_database_that_cannot_be_moved_stops_the_start(install):
+def test_a_file_that_is_not_a_database_stops_the_start(install):
     LEGACY_DB.write_bytes(b"this is not a database" * 100)
     target = default_db_path(install)
 
-    with pytest.raises(PagError, match="could not be moved"):
+    with pytest.raises(PagError, match="is damaged"):
         relocate_database(target, install)
 
     # Nothing changed: no empty database in its place, the old file untouched.
@@ -261,7 +261,7 @@ def test_a_database_that_cannot_be_moved_stops_the_start(install):
     assert no_leftovers(target.parent) == []
 
 
-def test_a_copy_that_does_not_check_out_stops_the_start(install):
+def test_a_damaged_database_stops_the_start(install):
     with Store(LEGACY_DB) as store:
         for n in range(400):
             store.set_binding("Anime", f"mal://{n}", "mal", str(n), note="x" * 200)
@@ -273,12 +273,40 @@ def test_a_copy_that_does_not_check_out_stops_the_start(install):
         raw.seek((pages // 2) * size)
         raw.write(b"\xff" * 64)
 
-    with pytest.raises(PagError, match="does not check out"):
+    # Which step notices depends on the SQLite version: the copy's check, or
+    # an earlier read. The verdict is the same.
+    with pytest.raises(PagError, match="is damaged"):
         relocate_database(default_db_path(install), install)
 
     assert not default_db_path(install).exists()
     assert LEGACY_DB.is_file()
     assert no_leftovers(default_db_path(install).parent) == []
+
+
+def test_a_copy_that_does_not_check_out_stops_the_start(install, monkeypatch):
+    with Store(LEGACY_DB) as store:
+        remember_some(store)
+    monkeypatch.setattr(migration, "_quick_check", lambda conn: "Page 7: never used")
+
+    with pytest.raises(PagError, match="does not check out: Page 7: never used"):
+        relocate_database(default_db_path(install), install)
+
+    assert not default_db_path(install).exists()
+    assert LEGACY_DB.is_file()
+    assert no_leftovers(default_db_path(install).parent) == []
+
+
+@as_root
+def test_a_config_directory_the_app_cannot_write_stops_the_move(install, tmp_path):
+    with Store(LEGACY_DB) as store:
+        remember_some(store)
+    (tmp_path / "config").chmod(0o555)
+    try:
+        with pytest.raises(PagError, match="could not be moved .* writable"):
+            relocate_database(default_db_path(install), install)
+    finally:
+        (tmp_path / "config").chmod(0o755)
+    assert LEGACY_DB.is_file()
 
 
 def test_an_old_database_still_open_elsewhere_is_not_moved(install):
@@ -417,7 +445,7 @@ def test_the_cli_refuses_to_start_empty_when_the_move_fails(install, tmp_path, c
 
     assert cli.main(["--config", str(install), "bindings"]) == 1
 
-    assert "could not be moved" in capsys.readouterr().err
+    assert "is damaged" in capsys.readouterr().err
     assert not (tmp_path / "config" / DB_FILENAME).exists()
 
 
@@ -457,7 +485,7 @@ def test_the_server_does_not_start_on_an_empty_database_when_the_move_fails(inst
     LEGACY_DB.write_bytes(b"not a database" * 100)
 
     app = create_app(install, static_dir=tmp_path / "no-ui", auth=AuthSettings(password=None))
-    with pytest.raises(PagError, match="could not be moved"), TestClient(app):
+    with pytest.raises(PagError, match="is damaged"), TestClient(app):
         pass
 
     assert not (tmp_path / "config" / DB_FILENAME).exists()

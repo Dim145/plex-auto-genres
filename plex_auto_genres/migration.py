@@ -133,6 +133,16 @@ class _InUse(Exception):
     """Another process has this database open."""
 
 
+class _Damaged(sqlite3.DatabaseError):
+    """A copy that does not check out."""
+
+
+def _damaged(exc: BaseException) -> bool:
+    """Is this SQLite saying the file itself is broken, whichever step noticed?"""
+    return isinstance(exc, _Damaged) or \
+        getattr(exc, "sqlite_errorname", "") in ("SQLITE_CORRUPT", "SQLITE_NOTADB")
+
+
 def legacy_db() -> Path:
     """Where an install from 2.4 or older keeps its database."""
     return Path(os.environ.get("PAG_LEGACY_DB") or LEGACY_DB)
@@ -210,6 +220,12 @@ def relocate_database(db_path: str | Path, config_path: str | Path) -> Path | No
     except (sqlite3.Error, OSError) as exc:
         if target.exists() and not legacy.exists():
             return None  # another process moved it while this one was trying
+        if _damaged(exc):
+            raise PagError(
+                f"The state database at {legacy} is damaged ({exc}), so it was not moved. "
+                "Nothing was changed. Put back a copy from a backup, or move it away to start "
+                "with an empty database."
+            ) from exc
         raise PagError(
             f"The state database at {legacy} could not be moved to {target} ({exc}). Nothing "
             "was changed. Make both directories writable by the user the app runs as, or move "
@@ -339,9 +355,9 @@ def _copy_database(source: Path, target: Path) -> Path:
                 contextlib.closing(sqlite3.connect(partial)) as dst:
             src.backup(dst, progress=functools.partial(_refuse_to_wait, source))
             dst.execute("PRAGMA journal_mode=DELETE")
-            verdict = dst.execute("PRAGMA quick_check").fetchone()[0]
+            verdict = _quick_check(dst)
         if verdict != "ok":
-            raise sqlite3.DatabaseError(f"the copy does not check out: {verdict}")
+            raise _Damaged(f"the copy does not check out: {verdict}")
     except BaseException:
         for suffix in ("", *_COMPANIONS):
             partial.with_name(partial.name + suffix).unlink(missing_ok=True)
@@ -349,6 +365,11 @@ def _copy_database(source: Path, target: Path) -> Path:
     for suffix in _COMPANIONS:
         partial.with_name(partial.name + suffix).unlink(missing_ok=True)
     return partial
+
+
+def _quick_check(conn: sqlite3.Connection) -> str:
+    """SQLite's own verdict on a database: "ok", or what is wrong with it."""
+    return conn.execute("PRAGMA quick_check").fetchone()[0]
 
 
 def _refuse_to_wait(source: Path, status: int, _remaining: int, _total: int) -> None:
