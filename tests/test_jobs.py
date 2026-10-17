@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 
 import httpx
 import pytest
@@ -252,6 +253,44 @@ async def test_stop_cancels_the_running_job(manager: JobManager, monkeypatch):
     await wait_for(lambda: job.status == "running")
     await manager.stop()
     assert job.status == "cancelled" and job.error == "server shutting down"
+
+
+@respx.mock
+async def test_a_stop_after_a_cancel_still_stops_the_worker(store: Store):
+    """A cancelled job sees its write to Plex through. A server stop arriving
+    meanwhile was swallowed by the worker, which went back to its queue, and
+    the stop waited for it for good."""
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d+").mock(side_effect=jikan_ok)
+    started, released = threading.Event(), threading.Event()
+    slow = item(1, "Slow")
+    plain_edit = slow.edit
+
+    def edit(**kwargs):
+        started.set()
+        released.wait(5)                    # Plex answers once the stop is under way
+        return plain_edit(**kwargs)
+
+    slow.edit = edit
+    server, config = FakeServer([slow]), make_config()
+
+    async def plex():
+        return server
+
+    manager = JobManager(store, lambda: config, plex, history=5)
+    await manager.start()
+    job = manager.enqueue("Animes")
+    await asyncio.to_thread(started.wait, 5)
+
+    await manager.cancel(job.job_id)
+    await asyncio.sleep(0.05)               # the cancelled run waits on its write
+    stopping = asyncio.create_task(manager.stop())
+    await asyncio.sleep(0.05)               # the stop has reached the worker
+    released.set()
+    done, _ = await asyncio.wait({stopping}, timeout=3)
+
+    assert stopping in done, "the stop went through"
+    assert job.status == "cancelled" and job.error is None, "cancelled by hand, not by the stop"
+    assert (job.reports[0]["written"], job.reports[0]["plex_requests"]) == (1, 1)
 
 
 async def test_enqueue_all_skips_disabled_and_busy_libraries(manager: JobManager, monkeypatch):

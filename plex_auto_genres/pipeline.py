@@ -18,9 +18,10 @@ import contextlib
 import logging
 import time
 from collections import Counter
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeVar
 
 from .config import AppConfig, GenreRules, LibraryRun
 from .errors import (
@@ -150,6 +151,36 @@ def media_key(item: MediaItem) -> str:
     return item.identifier
 
 
+T = TypeVar("T")
+
+
+async def _see_through(work: Awaitable[T]) -> T:
+    """Await ``work`` to its end, even if the task awaiting it is cancelled meanwhile.
+
+    For a write already handed to Plex: cancelling the await does not call back
+    the thread making it, so the item ended up written, yet neither counted nor
+    cached -- and the next run asked its sources for it again. A cancellation
+    arriving meanwhile is taken back once the work is done, so the item reports
+    what happened to it: the run that is stopping waits for it, as it waits for
+    every item. One not yet writing is not held up by this.
+    """
+    inner = asyncio.ensure_future(work)
+    task = asyncio.current_task()
+    asked = task.cancelling() if task is not None else 0
+    while not inner.done():
+        # Waiting on it, unlike awaiting it, neither hands it the
+        # cancellation nor raises what it raises.
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.wait([inner])
+    if task is not None and not inner.cancelled():
+        # Every cancellation asked for meanwhile is taken back, however many
+        # of them reached the task as an exception. One of the work itself,
+        # as when the loop shuts down, goes on.
+        while task.cancelling() > asked:
+            task.uncancel()
+    return inner.result()
+
+
 ProgressFn = Callable[[ItemOutcome], None]
 #: Called once an action knows its scope: (run_id, total items, items to process).
 BeginFn = Callable[[str, int, int], None]
@@ -175,6 +206,12 @@ class RunScope:
         self._closed = True
         self.report.duration_s = time.monotonic() - self._started
         self._store.finish_run(self.report)
+
+    def amend(self) -> None:
+        """Write the closed report again, with what landed after it was closed."""
+        if self._closed:
+            self.report.duration_s = time.monotonic() - self._started
+            self._store.finish_run(self.report)
 
 
 class Pipeline:
@@ -308,7 +345,8 @@ class Pipeline:
         """Stop in-flight items and record what did happen.
 
         The row is closed *before* waiting on the workers, so a second cancel
-        arriving mid-wait cannot leave it dangling.
+        arriving mid-wait cannot leave it dangling, and written again once they
+        are done: an item whose write was already with Plex finishes it first.
         """
         for task in tasks:
             task.cancel()
@@ -316,16 +354,22 @@ class Pipeline:
         scope.report.plex_requests = writer.requests
         if close:
             scope.close()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        # An item that landed while the rest were being cancelled has already
-        # written to Plex. Leaving it out makes the report claim less than the
-        # run did -- visible as written=0 beside a non-zero Plex write count.
-        for task in tasks:
-            if (tallied is not None and task in tallied) or task.cancelled():
-                continue
-            if task.done() and task.exception() is None:
-                self._tally(scope.report, task.result())
-        scope.report.plex_requests = writer.requests
+        try:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            # A second cancel ends the wait, but only once every item has
+            # landed: what they did is recorded all the same. An item that
+            # landed while the rest were being cancelled has already written
+            # to Plex, and leaving it out makes the report claim less than the
+            # run did -- visible as written=0 beside a non-zero Plex write count.
+            for task in tasks:
+                if (tallied is not None and task in tallied) or task.cancelled():
+                    continue
+                if task.done() and task.exception() is None:
+                    self._tally(scope.report, task.result())
+            scope.report.plex_requests = writer.requests
+            if close:
+                scope.amend()
 
     # -- genre / collection tagging --------------------------------------
 
@@ -393,7 +437,7 @@ class Pipeline:
                         bindings=bindings,
                     )
 
-                    async with write_sem:
+                    async def write() -> ItemOutcome:
                         outcome = await asyncio.to_thread(
                             writer.write_tags,
                             item,
@@ -406,23 +450,27 @@ class Pipeline:
                         )
                         if run.rate_media and result.score is not None:
                             await asyncio.to_thread(writer.set_rating, item, result.score)
-
-                    if not self.dry_run:
-                        self.store.record_success(
-                            run.library, key,
-                            fingerprint=stamped, title=item.title,
-                            year=item.year, rating_key=item.rating_key, genres=outcome.after,
-                            provider=result.provider, provider_id=result.provider_id,
-                            score=result.score, source=result.matched_by,
+                        if not self.dry_run:
+                            self.store.record_success(
+                                run.library, key,
+                                fingerprint=stamped, title=item.title,
+                                year=item.year, rating_key=item.rating_key, genres=outcome.after,
+                                provider=result.provider, provider_id=result.provider_id,
+                                score=result.score, source=result.matched_by,
+                            )
+                        return ItemOutcome(
+                            item=item,
+                            status="written" if outcome.changed else "unchanged",
+                            genres=outcome.after,
+                            provider=result.provider,
+                            provider_id=result.provider_id,
+                            by_hand=result.matched_by == "manual",
                         )
-                    return ItemOutcome(
-                        item=item,
-                        status="written" if outcome.changed else "unchanged",
-                        genres=outcome.after,
-                        provider=result.provider,
-                        provider_id=result.provider_id,
-                        by_hand=result.matched_by == "manual",
-                    )
+
+                    async with write_sem:
+                        # Once with Plex, the item's write goes to its end and
+                        # is recorded, whatever happens to the run meanwhile.
+                        return await _see_through(write())
 
                 except ProviderUnavailable as exc:
                     # Not the title's fault, so nothing is written to the
@@ -789,7 +837,7 @@ class Pipeline:
                     if score is None:
                         return ItemOutcome(item=item, status="unchanged")
                     async with write_sem:
-                        ok = await asyncio.to_thread(writer.set_rating, item, score)
+                        ok = await _see_through(asyncio.to_thread(writer.set_rating, item, score))
                     return ItemOutcome(item=item, status="written" if ok else "unchanged")
                 except ProviderUnavailable as exc:
                     return ItemOutcome(
@@ -852,10 +900,10 @@ class Pipeline:
                     return ItemOutcome(item=item, status="skipped")
                 try:
                     async with write_sem:
-                        outcome = await asyncio.to_thread(
+                        outcome = await _see_through(asyncio.to_thread(
                             writer.write_tags, item, TagField.COLLECTION, [bucket], clear=False,
                             remove=manuals.get(media_key(item), NO_DECISION).removed,
-                        )
+                        ))
                 except Exception as exc:  # one refused write must not abort the pass
                     log.warning("Could not set the rating collection of %s: %s", item.title, exc)
                     return ItemOutcome(

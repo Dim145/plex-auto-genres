@@ -292,11 +292,16 @@ class JobManager:
                 await job.task
                 self._finish(job, "done")
             except asyncio.CancelledError:
-                if not job.cancel_requested:
-                    # The worker itself is being stopped: take the job down too.
+                worker = asyncio.current_task()
+                if not job.cancel_requested or (worker is not None and worker.cancelling()):
+                    # The worker itself is being stopped -- perhaps while a job
+                    # cancelled by hand still sees its last write through: take
+                    # the job down too, and stop. Going back to the queue
+                    # swallowed the stop, which then waited for good.
                     job.task.cancel()
                     await asyncio.gather(job.task, return_exceptions=True)
-                    job.error = "server shutting down"
+                    if not job.cancel_requested:
+                        job.error = "server shutting down"
                     self._finish(job, "cancelled")
                     raise
                 self._finish(job, "cancelled")

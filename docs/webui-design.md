@@ -994,6 +994,23 @@ an issued key with a stray blank came back quoted whole in the HTTP library's er
 too: the key loses the blanks around it and is refused, unquoted, if a header cannot carry
 it.
 
+### A write under way when a run stops — done
+
+Stopping a run — a cancel, or the give-up — cancels the items still in flight, and one
+already writing to Plex was cancelled with them: the thread making the write cannot be
+called back, so Plex got it, yet the item was neither counted nor cached. The report
+claimed fewer writes than Plex received, and the next run asked the sources for the item
+again. Once an item's write is with Plex, its tags, its rating and its cache entry now go
+to their end, and the item reports what happened to it; an item still asking its sources,
+or waiting for its turn to write, stops at once. A cancel still closes the run row before
+waiting, so that a second one cannot leave it open, and writes it again once the items
+have landed, a second cancel included — the job reads its report from there. The
+cancellations that reached a writing item are taken back (`Task.uncancel`) by count, not by
+the exceptions seen: two asked together arrive as one. Seeing a write through made a
+cancelled job take a moment to end, which exposed the job worker: a server stop arriving
+meanwhile was swallowed, the worker went back to its queue, and the stop waited for good.
+The worker now stops, whatever was cancelled first.
+
 ### Next
 
 Decide where secrets should live if they are ever to be edited from the UI — the

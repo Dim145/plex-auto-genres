@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+import threading
+import time
 
 import httpx
+import pytest
 import respx
 
 from plex_auto_genres.config import AppConfig
@@ -266,10 +271,6 @@ def test_rating_buckets():
 
 # -- review regressions: run rows always close, caches are reused ----------------
 
-
-import json  # noqa: E402
-
-import pytest  # noqa: E402
 
 from plex_auto_genres.errors import PlexConnectionError  # noqa: E402
 from plex_auto_genres.plexsvc.writer import undo_run  # noqa: E402
@@ -1078,6 +1079,137 @@ async def test_a_merge_missing_a_source_is_deferred_not_cached(store: Store, mon
 
     assert (report.deferred, report.written) == (1, 0)
     assert store.get_state("Animes", "mal://1") is None, "nothing cached, so it completes later"
+
+
+class _HeldWrite:
+    """A write to Plex that begins, then waits for the test to let it finish:
+    whatever the machine's load, it outlives the cancels sent meanwhile."""
+
+    def __init__(self, handle: FakePlexItem, method: str = "edit") -> None:
+        self.started = threading.Event()
+        self.released = threading.Event()
+        plain = getattr(handle, method)
+
+        def held(*args, **kwargs):
+            self.started.set()
+            self.released.wait(5)
+            return plain(*args, **kwargs)
+
+        setattr(handle, method, held)
+
+
+async def _never_answers(_request):
+    await asyncio.sleep(30)
+    return jikan_ok()
+
+
+async def _cancel_once_writing(run, write: _HeldWrite, store: Store, *, cancels: int = 1) -> dict:
+    """Cancel ``run`` while its first write is with Plex: the report it left."""
+    task = asyncio.create_task(run)
+    await asyncio.to_thread(write.started.wait, 5)
+    task.cancel()
+    began = time.monotonic()
+    for _ in range(cancels - 1):
+        await asyncio.sleep(0.05)       # the run now waits on its items
+        task.cancel()                   # a cancel button pressed again
+    write.released.set()                # only now does Plex answer
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert time.monotonic() - began < 5, "what was not writing yet did not hold the run up"
+    return json.loads(store.runs_started_after("Animes", 0)[0]["report"])
+
+
+@respx.mock
+async def test_a_write_under_way_when_the_run_is_cancelled_is_seen_through(store: Store):
+    """Cancelling the await does not call back the thread writing to Plex: the
+    item was written, yet neither counted nor cached, and the next run asked
+    for it again. A write already handed over now finishes and is recorded;
+    an item still asking its source stops at once."""
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/1$").mock(return_value=jikan_ok())
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/2$").mock(side_effect=_never_answers)
+    slow, waiting = guid_item(1, "Slow"), guid_item(2, "Waiting")
+    write = _HeldWrite(slow)
+    config = make_config(concurrency=2)
+    pipeline = Pipeline(config, store, FakeServer([slow, waiting]))
+
+    report = await _cancel_once_writing(pipeline.tag_library(config.libraries[0]), write, store)
+
+    assert report["cancelled"] and (report["written"], report["plex_requests"]) == (1, 1)
+    assert store.get_state("Animes", "mal://1").status == "ok", "cached: not asked again"
+    assert waiting.edits == [] and store.get_state("Animes", "mal://2") is None
+
+
+@respx.mock
+async def test_a_second_cancel_while_a_write_is_seen_through_still_records_it(store: Store):
+    """It ended the wait early, and the counting and the second write of the
+    run row went with it: the item was cached, the report said nothing."""
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/1$").mock(return_value=jikan_ok())
+    slow = guid_item(1, "Slow")
+    write = _HeldWrite(slow)
+    config = make_config()
+    pipeline = Pipeline(config, store, FakeServer([slow]))
+
+    report = await _cancel_once_writing(
+        pipeline.tag_library(config.libraries[0]), write, store, cancels=2
+    )
+
+    assert report["cancelled"] and (report["written"], report["plex_requests"]) == (1, 1)
+    assert store.get_state("Animes", "mal://1").status == "ok"
+
+
+@respx.mock
+async def test_a_rating_under_way_when_the_run_is_cancelled_is_counted(store: Store):
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/1$").mock(
+        return_value=jikan_ok(score=8.0)
+    )
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/2$").mock(side_effect=_never_answers)
+    slow, waiting = guid_item(1, "Slow"), guid_item(2, "Waiting")
+    write = _HeldWrite(slow, "rate")
+    config = make_config(concurrency=2)
+    pipeline = Pipeline(config, store, FakeServer([slow, waiting]))
+
+    report = await _cancel_once_writing(pipeline.rate_library(config.libraries[0]), write, store)
+
+    assert report["cancelled"] and (report["written"], report["plex_requests"]) == (1, 1)
+    assert slow.ratings == [8.0] and waiting.ratings == []
+
+
+async def test_seeing_a_write_through_takes_its_cancellation_back():
+    """The item reports what happened to it, as a task nobody is cancelling:
+    a cancellation suppressed without being taken back would stay counted."""
+    from plex_auto_genres.pipeline import _see_through
+
+    answered = asyncio.Event()
+
+    async def write():
+        await answered.wait()
+        return "written"
+
+    async def item():
+        done = await _see_through(write())
+        return done, asyncio.current_task().cancelling()
+
+    task = asyncio.create_task(item())
+    await asyncio.sleep(0)                         # the write is under way
+    task.cancel()
+    task.cancel()                                  # a second ask changes nothing
+    await asyncio.sleep(0)
+    answered.set()
+    assert await task == ("written", 0)
+
+
+async def test_a_rating_collection_under_way_when_the_run_is_cancelled_is_counted(store: Store):
+    slow = guid_item(1, "Slow")
+    slow.rating = 8.0
+    write = _HeldWrite(slow)
+    config = make_config()
+    pipeline = Pipeline(config, store, FakeServer([slow]))
+
+    report = await _cancel_once_writing(
+        pipeline.rating_collections(config.libraries[0]), write, store
+    )
+
+    assert report["cancelled"] and (report["written"], report["plex_requests"]) == (1, 1)
 
 
 def test_a_merged_result_takes_its_rating_from_the_source_that_names_it():
