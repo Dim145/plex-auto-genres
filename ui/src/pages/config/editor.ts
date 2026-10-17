@@ -78,16 +78,23 @@ export function describeLoc(loc: (string | number)[], doc: ConfigDocument): stri
   return loc.join(".") || "config";
 }
 
-/** Provider order presets for anime; standard libraries only have TMDB. */
-export const ANIME_PROVIDER_PRESETS: { key: string; label: string; value: string[] | null; hint: string }[] = [
-  { key: "default", label: "jikan", value: null, hint: "MyAnimeList via Jikan (default)" },
-  { key: "jikan,anilist", label: "jikan → anilist", value: ["jikan", "anilist"], hint: "AniList as a fallback" },
-  { key: "anilist,jikan", label: "anilist → jikan", value: ["anilist", "jikan"], hint: "AniList first" },
-  { key: "anilist", label: "anilist", value: ["anilist"], hint: "AniList only" },
-];
+/** What a library of each type can read from, in the order they are offered. */
+export const SOURCES: Record<MediaType, string[]> = {
+  anime: ["jikan", "anilist", "ams", "tmdb"],
+  "standard-tv": ["tmdb", "ams"],
+  "standard-movie": ["tmdb", "ams"],
+};
 
-/** An anime library may end its chain with TMDB; it is never one of the presets. */
-export const ANIME_FALLBACK = "tmdb";
+/** Each source in a line, and the setting it cannot run without. */
+export const SOURCE_INFO: Record<string, { hint: string; needs?: string }> = {
+  jikan: { hint: "MyAnimeList, through Jikan" },
+  anilist: { hint: "AniList, with its community tags" },
+  ams: { hint: "Your arr-metadata-server: its catalogue, corrections included", needs: "ARR_METADATA_URL" },
+  tmdb: { hint: "The Movie Database. For anime, its own genres, not MyAnimeList's", needs: "TMDB_API_KEY" },
+};
+
+/** What a library reads when its chain is left unset. */
+export const defaultChain = (type: MediaType): string[] => (type === "anime" ? ["jikan"] : ["tmdb"]);
 
 /**
  * Sources with something finer than genres, which `useKeywords` asks for.
@@ -98,34 +105,16 @@ export const KEYWORD_SOURCES = ["anilist", "tmdb"];
 
 /** What a library actually reads, the way the server resolves it. */
 export const sourceChain = (providers: string[] | null, type: MediaType): string[] =>
-  providers ?? (type === "anime" ? ["jikan"] : ["tmdb"]);
-
-/** The anime sources of a chain, without the optional TMDB tail. */
-const animeSources = (providers: string[] | null) =>
-  (providers ?? []).filter((p) => p !== ANIME_FALLBACK);
-
-export const providerPresetKey = (providers: string[] | null) => {
-  const sources = animeSources(providers);
-  if (sources.length === 0) return "default";
-  const key = sources.join(",");
-  return ANIME_PROVIDER_PRESETS.some((p) => p.key === key) ? key : "default";
-};
-
-export const hasTmdbFallback = (providers: string[] | null) =>
-  (providers ?? []).includes(ANIME_FALLBACK);
+  providers ?? defaultChain(type);
 
 /**
- * Rewrite an anime library's provider chain. `preset` picks the anime sources
- * (null = the default, jikan), `fallback` appends TMDB after them. The chain
- * goes back to null — "the default" — when it says nothing a default would not.
+ * A chain as the config keeps it: null -- "the default" -- when it says
+ * nothing the default would not, so the file follows a future default.
  */
-export function animeProviders(
-  preset: string[] | null,
-  fallback: boolean,
-): string[] | null {
-  const sources = preset ?? [];
-  if (!fallback) return sources.length ? sources : null;
-  return [...(sources.length ? sources : ["jikan"]), ANIME_FALLBACK];
+export function storedChain(chain: string[], type: MediaType): string[] | null {
+  const fallback = defaultChain(type);
+  const same = chain.length === fallback.length && chain.every((p, i) => p === fallback[i]);
+  return same ? null : chain;
 }
 
 // -- JSON Schema access (help text and enums stay in step with the models) ----

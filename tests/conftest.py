@@ -12,8 +12,13 @@ from plex_auto_genres.store import Store
 
 @pytest.fixture(autouse=True)
 def _no_image_paths(monkeypatch):
-    """The image names where an old database sits; tests run with the defaults."""
-    monkeypatch.delenv("PAG_LEGACY_DB", raising=False)
+    """The image names where an old database sits; tests run with the defaults.
+
+    The same for the arr-metadata-server a developer's shell or ``.env`` may
+    name, which ``cli.main`` loads into the environment for the session.
+    """
+    for name in ("PAG_LEGACY_DB", "ARR_METADATA_URL", "ARR_METADATA_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
 
 
 class FakePlexItem:

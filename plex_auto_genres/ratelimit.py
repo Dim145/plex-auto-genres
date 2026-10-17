@@ -209,3 +209,9 @@ ANILIST_LIMITS = LimitSpec(((30, 60.0),))
 #: per second range", with no header to read and an instruction to respect the
 #: 429, which the transport does.
 TMDB_LIMITS = LimitSpec(((40, 1.0),))
+#: arr-metadata-server answers 600 requests a minute per address unless its
+#: operator says otherwise (AMS_RATE_LIMIT_PER_MINUTE), and says when to come
+#: back in Retry-After. That budget is one per address, whatever the route:
+#: Plex, Sonarr and Radarr calling from the same address -- the Docker host,
+#: behind NAT -- spend it too. A run takes at most 240 of it.
+AMS_LIMITS = LimitSpec(((5, 1.0), (240, 60.0)))

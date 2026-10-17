@@ -437,6 +437,48 @@ async def test_a_standing_down_source_ignores_what_was_already_in_flight():
         assert pool._health["jikan"].stand_downs == 1   # noqa: SLF001
 
 
+@respx.mock
+async def test_tmdb_asks_for_a_film_in_an_anime_library_as_a_film():
+    """An anime library is as often a section of films, whose ids are TMDB's
+    film ids: asked for among the series, a film's id fetched another work."""
+    respx.get("https://api.themoviedb.org/3/movie/129").mock(
+        return_value=httpx.Response(200, json={
+            "id": 129, "title": "Spirited Away", "genres": [{"name": "Animation"}],
+        })
+    )
+    search = respx.get("https://api.themoviedb.org/3/search/movie").mock(
+        return_value=httpx.Response(200, json={"results": [
+            {"id": 129, "title": "Spirited Away", "release_date": "2001-07-20"},
+        ]})
+    )
+    provider = TmdbProvider(transport("tmdb"), "k")
+    request = LookupRequest("Spirited Away", 2001, MediaType.ANIME, plex_type="movie")
+
+    by_id = await provider.fetch_by_id(ExternalId("tmdb", "129"), request)
+    found = await provider.search(request)
+    picked = await provider.search_candidates(request)
+
+    assert by_id.url == "https://www.themoviedb.org/movie/129" and found.provider_id == "129"
+    assert search.calls[0].request.url.params["year"] == "2001"
+    assert [c.url for c in picked] == ["https://www.themoviedb.org/movie/129"]
+
+
+async def test_a_refusal_holds_for_the_run_whatever_lands_after_it():
+    """An answer to a question put before the refusal landed let the source
+    back in, still listed as refused -- so a second refusal never stood it
+    down again, and it was asked title after title."""
+    provider = JikanProvider(transport("jikan"))
+    async with httpx.AsyncClient() as client:
+        pool = ProviderPool([provider], client)
+        pool.note_refused(provider, "jikan: HTTP 403")
+        pool.note_reachable(provider)
+        assert pool.usable([provider]) == []
+
+        pool.note_refused(provider, "jikan: HTTP 403")
+        assert pool.usable([provider]) == []
+        assert pool.refusals() == "jikan: HTTP 403."
+
+
 # -- ids TMDB has to cross-reference ---------------------------------------
 
 
@@ -516,7 +558,10 @@ def test_bindable_schemes_follow_what_the_sources_read():
 
     assert bindable_schemes(MediaType.STANDARD_TV, ["tmdb"]) == ["tmdb", "imdb", "tvdb"]
     assert bindable_schemes(MediaType.STANDARD_MOVIE, ["tmdb"]) == ["tmdb", "imdb"]
-    assert bindable_schemes(MediaType.ANIME, []) == ["anidb"]
+    # The mapping table turns an AniDB id into MAL's and AniList's: a library
+    # reading neither would store the pin and fail it on every run.
+    assert "anidb" not in bindable_schemes(MediaType.ANIME, ["tmdb"])
+    assert bindable_schemes(MediaType.ANIME, []) == []
 
 
 @respx.mock

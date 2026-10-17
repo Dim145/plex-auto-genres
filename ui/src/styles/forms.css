@@ -39,6 +39,8 @@
   display: grid;
   gap: 6px;
   min-width: 0;
+  /* A taller neighbour in the same row must not stretch the control. */
+  align-content: start;
 }
 
 .field > * {
@@ -286,12 +288,15 @@
   transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
 }
 
-.iconbtn:hover:not(:disabled) {
+.iconbtn:hover:not(:disabled, [aria-disabled="true"]) {
   background: var(--surface-3);
   color: var(--ink);
 }
 
-.iconbtn:disabled {
+/* aria-disabled keeps a button in the tab order -- and keeps focus on it when
+   what it does stops applying under the keyboard, as a list is reordered. */
+.iconbtn:disabled,
+.iconbtn[aria-disabled="true"] {
   opacity: 0.35;
   cursor: not-allowed;
 }
@@ -365,6 +370,82 @@
   .editor-grid > .span-2 {
     grid-column: 1 / -1;
   }
+}
+
+/* ---- the sources a library reads from ------------------------------------- */
+
+.chain {
+  display: grid;
+  gap: 8px;
+}
+
+.chain__list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.chain__item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 4px 4px 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.chain__rank {
+  min-width: 1ch;
+  font-size: var(--fs-12);
+}
+
+.chain__what {
+  display: grid;
+  min-width: 0;
+}
+
+.chain__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+.chain__name {
+  font-size: var(--fs-13);
+}
+
+.chain__head .chip {
+  margin-left: 0;
+}
+
+/* One line, cut short on a narrow card; the whole of it is in the title. */
+.chain__hint {
+  overflow: hidden;
+  font-size: var(--fs-12);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chain__tools {
+  display: flex;
+  gap: 2px;
+}
+
+.chain__add {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.chain__default {
+  font-size: var(--fs-12);
 }
 
 /* ---- schedule ------------------------------------------------------------ */

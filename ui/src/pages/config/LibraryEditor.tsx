@@ -4,8 +4,9 @@ import type { LibraryRun, MediaType, ValidationIssue } from "../../api/types";
 import { Field } from "../../components/form/Field";
 import { Segmented } from "../../components/form/Segmented";
 import { Toggle } from "../../components/form/Toggle";
-import { ANIME_PROVIDER_PRESETS, KEYWORD_SOURCES, TYPES, animeProviders, emptyRules, hasTmdbFallback, issueAt, issuesOwn, providerPresetKey, rulesEmpty, sourceChain, type Help } from "./editor";
+import { KEYWORD_SOURCES, TYPES, emptyRules, issueAt, issuesOwn, rulesEmpty, sourceChain, storedChain, type Help } from "./editor";
 import { RulesEditor } from "./RulesEditor";
+import { SourceChain } from "./SourceChain";
 
 export function LibraryEditor({
   lib,
@@ -13,6 +14,7 @@ export function LibraryEditor({
   errors,
   help,
   plexSections,
+  missing,
   onChange,
   onRemove,
   onMove,
@@ -25,6 +27,8 @@ export function LibraryEditor({
   errors: ValidationIssue[];
   help: Help;
   plexSections: string[];
+  /** Environment settings a source needs that are not set. */
+  missing: string[];
   onChange: (next: LibraryRun) => void;
   onRemove: () => void;
   onMove: (delta: -1 | 1) => void;
@@ -43,7 +47,6 @@ export function LibraryEditor({
   // Keywords exist only where a source has them, so the toggle follows the
   // chain rather than the library type.
   const hasKeywords = chain.some((p) => KEYWORD_SOURCES.includes(p));
-  const merging = lib.providerMode === "merge";
 
   /**
    * Set the source chain, dropping what it can no longer support: keywords
@@ -118,54 +121,27 @@ export function LibraryEditor({
         </Field>
 
         <Field id={`${id}-providers`} label="Reads from" help={help("LibraryRun", "providers")} error={err("providers")}>
-          {isAnime ? (
-            <div className="stack stack--tight">
+          <div className="stack stack--tight">
+            <SourceChain
+              type={lib.type}
+              chain={chain}
+              isDefault={lib.providers === null}
+              missing={missing}
+              onChange={(next) => setProviders(storedChain(next, lib.type))}
+            />
+            {chain.length > 1 && (
               <Segmented
-                name={`${id}-providers`}
-                ariaLabel="Providers"
-                value={providerPresetKey(lib.providers)}
-                onChange={(key) =>
-                  setProviders(
-                    animeProviders(
-                      ANIME_PROVIDER_PRESETS.find((p) => p.key === key)?.value ?? null,
-                      hasTmdbFallback(lib.providers),
-                    ),
-                  )
-                }
-                options={ANIME_PROVIDER_PRESETS.map((p) => ({ value: p.key, label: p.label, hint: p.hint }))}
+                name={`${id}-mode`}
+                ariaLabel="How the sources combine"
+                value={lib.providerMode}
+                onChange={(v) => set("providerMode", v)}
+                options={[
+                  { value: "fallback", label: "first answer", hint: "Ask in order, keep the first source that answers" },
+                  { value: "merge", label: "merge all", hint: "Ask every source and pool what they return" },
+                ]}
               />
-              <Toggle
-                id={`${id}-tmdb-fallback`}
-                checked={hasTmdbFallback(lib.providers)}
-                onChange={(on) =>
-                  setProviders(
-                    animeProviders(
-                      ANIME_PROVIDER_PRESETS.find((p) => p.key === providerPresetKey(lib.providers))?.value ?? null,
-                      on,
-                    ),
-                  )
-                }
-                label={merging ? "…and TMDB" : "…then TMDB"}
-                help={merging
-                  ? "TMDB is asked for every title too, and its genres join the anime ones. Needs TMDB_API_KEY."
-                  : "A last resort when no anime source answers. Returns TMDB's own genres, and needs TMDB_API_KEY."}
-              />
-              {chain.length > 1 && (
-                <Segmented
-                  name={`${id}-mode`}
-                  ariaLabel="How the sources combine"
-                  value={lib.providerMode}
-                  onChange={(v) => set("providerMode", v)}
-                  options={[
-                    { value: "fallback", label: "first answer", hint: "Ask in order, keep the first source that answers" },
-                    { value: "merge", label: "merge all", hint: "Ask every source and pool what they return" },
-                  ]}
-                />
-              )}
-            </div>
-          ) : (
-            <div className="mono tone-teal" style={{ minHeight: 38, display: "flex", alignItems: "center" }}>tmdb</div>
-          )}
+            )}
+          </div>
         </Field>
 
         <Field id={`${id}-writes`} label="Writes to" help={help("LibraryRun", "useGenres")} error={err("useGenres")}>

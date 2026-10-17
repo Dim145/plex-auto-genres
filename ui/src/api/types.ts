@@ -78,6 +78,9 @@ export interface Secrets {
   plex_base_url: string | null;
   plex_server_name: string | null;
   collection_prefix: string;
+  /** The arr-metadata-server the `ams` source asks; never with credentials. */
+  ams_url: string | null;
+  ams_api_key: boolean;
 }
 
 export interface ConfigView {
@@ -315,6 +318,8 @@ export interface ItemView {
   media_key: string;
   title: string;
   year: number | null;
+  /** What Plex holds the item as: an anime library is as often a section of films. */
+  kind: "movie" | "show" | null;
   thumb: string | null;
   guids: string[];
   match: MatchSource;
@@ -358,7 +363,7 @@ export interface CandidateView {
   genres: string[];
 }
 
-export type BindingProvider = "tmdb" | "mal" | "anilist" | "anidb" | "tvdb" | "imdb";
+export type BindingProvider = "tmdb" | "mal" | "anilist" | "anidb" | "tvdb" | "imdb" | "ams";
 
 export interface BindingIn {
   library: string;

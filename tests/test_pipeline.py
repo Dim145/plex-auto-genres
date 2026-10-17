@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import httpx
 import respx
 
@@ -444,6 +446,155 @@ async def test_a_provider_auth_failure_falls_through_to_the_next_provider(store:
 
 
 @respx.mock
+async def test_a_source_that_refuses_this_app_sits_out_the_rest_of_the_run(store: Store, caplog):
+    refused = respx.post("https://graphql.anilist.co").mock(return_value=httpx.Response(403))
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d+").mock(return_value=jikan_ok())
+    items = [guid_item(i, f"Title {i}") for i in range(1, 4)]
+    config = make_config(concurrency=1, providers=["anilist", "jikan"])
+
+    with caplog.at_level(logging.WARNING, logger="plex_auto_genres.providers"):
+        report = await Pipeline(config, store, FakeServer(items)).tag_library(config.libraries[0])
+
+    assert report.written == 3
+    assert refused.call_count == 1, "asked once, not once per title"
+    assert caplog.text.count("anilist refused this app") == 1
+
+
+@respx.mock
+async def test_titles_only_a_refusing_source_could_answer_are_deferred_not_failed(
+    store: Store, monkeypatch
+):
+    # A refusal says nothing about the title: caching it as a miss would hide
+    # the title behind a backoff for a key or an address that is fixed later.
+    unmetered(monkeypatch, "anilist")
+    refused = respx.post("https://graphql.anilist.co").mock(return_value=httpx.Response(403))
+    items = [guid_item(i, f"Title {i}") for i in range(1, GIVE_UP_AFTER + 6)]
+    config = make_config(concurrency=1, providers=["anilist"])
+
+    report = await Pipeline(config, store, FakeServer(items)).tag_library(config.libraries[0])
+
+    assert report.failed == 0 and report.deferred >= GIVE_UP_AFTER
+    assert refused.call_count == 1, "asked once, not once per title"
+    assert not store.states_for_library("Animes"), "no verdict was cached"
+    assert report.error and report.error.startswith("anilist: HTTP 403")
+    assert "next run" in report.error
+
+
+@respx.mock
+async def test_a_merge_needing_a_refusing_source_waits_without_asking_the_others(
+    store: Store, monkeypatch
+):
+    """No title is complete without it, and asking the others for every title
+    only to throw their answers away spent their budget for nothing. A title
+    pinned to another source, or decided by hand, does not need it."""
+    unmetered(monkeypatch, "anilist", "tmdb")
+    tmdb = respx.get(url__regex=r"https://api\.themoviedb\.org/3/.*").mock(
+        return_value=httpx.Response(401)
+    )
+    anilist = respx.post("https://graphql.anilist.co").mock(return_value=anilist_ok())
+    items = [guid_item(i, f"Title {i}") for i in range(1, 7)]
+    store.set_binding("Animes", "mal://5", "anilist", "21")
+    store.set_manual("Animes", "mal://6", added=["Mecha"], removed=[], locked=True)
+    config = make_config(concurrency=1, tmdb_key="k", providers=["anilist", "tmdb"],
+                         providerMode="merge")
+
+    report = await Pipeline(config, store, FakeServer(items)).tag_library(config.libraries[0])
+
+    assert tmdb.call_count == 1, "refused once, then never asked again"
+    assert anilist.call_count == 2, "asked for the first title and the one pinned to it"
+    assert (report.written, report.deferred, report.failed) == (2, 4, 0)
+    assert store.get_state("Animes", "mal://1") is None, "nothing cached, so it completes later"
+    assert report.error and report.error.startswith("tmdb: HTTP 401")
+    assert "went without tmdb" in report.error and "next run" in report.error
+
+
+@respx.mock
+async def test_ratings_from_the_cache_go_on_while_a_source_refuses(store: Store, monkeypatch):
+    """Most of a ratings pass needs no source: stopping it over one that
+    refused this app left the cached scores unwritten for as long as it did."""
+    unmetered(monkeypatch, "jikan", "anilist")
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d+").mock(
+        return_value=jikan_ok(score=8.0)
+    )
+    anilist = respx.post("https://graphql.anilist.co").mock(return_value=anilist_ok())
+    items = [guid_item(i, f"Title {i}") for i in range(1, 6)]
+    config = make_config(concurrency=1, providers=["jikan", "anilist"], providerMode="merge",
+                         rateAnime=True)
+    run = config.libraries[0]
+    await Pipeline(config, store, FakeServer(items)).tag_library(run)    # every score cached
+
+    anilist.mock(return_value=httpx.Response(403))
+    for handle in items:
+        handle.ratings.clear()
+    late = guid_item(9, "Late")                     # never tagged: it needs the sources
+    report = await Pipeline(config, store, FakeServer([late, *items])).rate_library(run)
+
+    assert all(handle.ratings for handle in items), "every cached score was written"
+    assert (report.deferred, report.failed) == (1, 0)
+
+
+@respx.mock
+async def test_a_title_the_others_miss_waits_while_a_source_refuses(store: Store, monkeypatch):
+    """The source that refused could be the one that has it: a miss cached now
+    would hide the title behind the backoff once it lets this app in."""
+    unmetered(monkeypatch, "jikan", "anilist")
+    respx.post("https://graphql.anilist.co").mock(return_value=httpx.Response(403))
+    respx.get("https://api.jikan.moe/v4/anime/1").mock(return_value=jikan_ok())
+    respx.get("https://api.jikan.moe/v4/anime/2").mock(return_value=httpx.Response(404))
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime\b").mock(
+        return_value=httpx.Response(200, json={"data": []})
+    )
+    items = [guid_item(1, "Found"), guid_item(2, "Missing")]
+    config = make_config(concurrency=1, providers=["anilist", "jikan"])
+
+    report = await Pipeline(config, store, FakeServer(items)).tag_library(config.libraries[0])
+
+    assert (report.written, report.deferred, report.failed) == (1, 1, 0)
+    assert store.get_state("Animes", "mal://2") is None
+    assert report.error and "went without anilist" in report.error, "said on the run too"
+
+
+@respx.mock
+async def test_a_pin_is_not_put_to_a_source_that_refused_this_app(store: Store, monkeypatch):
+    """It would only refuse again: the title waits for the next run instead."""
+    unmetered(monkeypatch, "jikan", "anilist")
+    refused = respx.post("https://graphql.anilist.co").mock(return_value=httpx.Response(403))
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d+").mock(return_value=jikan_ok())
+    items = [guid_item(1, "First"), guid_item(2, "Pinned")]
+    store.set_binding("Animes", "mal://2", "anilist", "21")
+    config = make_config(concurrency=1, providers=["anilist", "jikan"])
+
+    report = await Pipeline(config, store, FakeServer(items)).tag_library(config.libraries[0])
+
+    assert refused.call_count == 1
+    assert (report.written, report.deferred) == (1, 1)
+    assert store.get_state("Animes", "mal://2") is None
+
+
+@respx.mock
+async def test_a_merge_one_source_misses_and_another_cannot_answer_is_deferred(
+    store: Store, monkeypatch
+):
+    """What the third source says does not complete a merge the second could
+    not answer: it waits for the next run rather than failing."""
+    unmetered(monkeypatch, "jikan", "anilist", "tmdb")
+    monkeypatch.setattr(HttpTransport, "_sleep_backoff", staticmethod(_no_backoff))
+    respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d+").mock(return_value=jikan_ok())
+    respx.post("https://graphql.anilist.co").mock(return_value=httpx.Response(504))
+    respx.get(url__regex=r"https://api\.themoviedb\.org/3/search/tv").mock(
+        return_value=httpx.Response(200, json={"results": []})
+    )
+    handle = guid_item()
+    config = make_config(tmdb_key="k", providers=["jikan", "anilist", "tmdb"],
+                         providerMode="merge")
+
+    report = await Pipeline(config, store, FakeServer([handle])).tag_library(config.libraries[0])
+
+    assert (report.deferred, report.written, report.failed) == (1, 0, 0)
+    assert store.get_state("Animes", "mal://1") is None
+
+
+@respx.mock
 async def test_an_anime_library_can_fall_back_to_tmdb(store: Store):
     """The last resort: nothing on MAL, so TMDB's TV entry answers instead."""
     respx.get(url__regex=r"https://api\.jikan\.moe/v4/anime/\d+").mock(
@@ -859,6 +1010,28 @@ async def test_a_pin_no_source_can_read_says_so(store: Store):
 
     assert report.failed == 1 and report.written == 0
     assert "tmdb://7" in report.failures[0][1] and "jikan" in report.failures[0][1]
+
+
+@respx.mock
+async def test_a_pin_is_judged_by_what_the_item_is(store: Store):
+    """A TheTVDB pin on a film -- left from when its library was typed for
+    series -- is one ams cannot read for a film: it says so rather than
+    resolving the title some other way."""
+    asked = respx.route(host="ams.test")
+    handle = guid_item()
+    handle.type = "movie"
+    store.set_binding("Animes", "mal://1", "tvdb", "169")
+    config = AppConfig.model_validate({
+        "version": 2,
+        "libraries": [{"library": "Animes", "type": "anime", "useGenres": True,
+                       "providers": ["ams"]}],
+        "providers": {"ams_url": "http://ams.test"},
+    })
+
+    report = await Pipeline(config, store, FakeServer([handle])).tag_library(config.libraries[0])
+
+    assert report.failed == 1 and not asked.called
+    assert "tvdb://169" in report.failures[0][1] and "ams" in report.failures[0][1]
 
 
 @respx.mock

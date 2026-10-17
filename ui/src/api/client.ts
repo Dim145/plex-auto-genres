@@ -137,12 +137,13 @@ export const api = {
     send<{ forgotten: boolean }>("POST", `/api/v1/libraries/${encodeURIComponent(library)}/items/forget?media_key=${encodeURIComponent(mediaKey)}`, undefined),
   refreshLibrary: (library: string) =>
     send<{ refreshed: boolean }>("POST", `/api/v1/libraries/${encodeURIComponent(library)}/refresh`, undefined),
-  search: (params: { q: string; type: MediaType; provider?: string; year?: number | null; limit?: number }) =>
+  search: (params: { q: string; type: MediaType; provider?: string; year?: number | null; kind?: "movie" | "show" | null; limit?: number }) =>
     get<CandidateView[]>("/api/v1/search", {
       q: params.q,
       type: params.type,
       provider: params.provider,
       year: params.year ?? undefined,
+      kind: params.kind ?? undefined,
       limit: params.limit,
     }),
   createBinding: (body: BindingIn) => send<BindingView>("POST", "/api/v1/bindings", body),
@@ -430,9 +431,9 @@ export const useLibraryItems = (library: string, query: ItemsQuery) =>
     placeholderData: (prev) => prev,
   });
 
-export const useCandidates = (params: { q: string; type: MediaType; provider?: string; year?: number | null } | null) =>
+export const useCandidates = (params: { q: string; type: MediaType; provider?: string; year?: number | null; kind?: "movie" | "show" | null } | null) =>
   useQuery({
-    queryKey: ["candidates", params?.q ?? "", params?.type ?? "", params?.provider ?? "", params?.year ?? ""],
+    queryKey: ["candidates", params?.q ?? "", params?.type ?? "", params?.provider ?? "", params?.year ?? "", params?.kind ?? ""],
     queryFn: () => api.search(params!),
     enabled: Boolean(params && params.q.trim()),
     staleTime: 5 * 60_000,

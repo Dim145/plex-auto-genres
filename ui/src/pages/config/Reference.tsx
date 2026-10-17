@@ -5,9 +5,9 @@ import { Panel } from "../../components/Panel";
 import { StatusDot, toneForLevel } from "../../components/StatusDot";
 import { reveal } from "../../lib/reveal";
 
-function Presence({ set, legacy = false }: { set: boolean; legacy?: boolean }) {
+function Presence({ set, quiet }: { set: boolean; quiet?: "legacy" | "optional" }) {
   if (set) return <StatusDot tone="ok" label="set" />;
-  return <StatusDot tone={legacy ? "muted" : "warn"} label={legacy ? "unset (legacy)" : "unset"} />;
+  return <StatusDot tone={quiet ? "muted" : "warn"} label={quiet ? `unset (${quiet})` : "unset"} />;
 }
 
 /** Environment and doctor: read-only reference below the editor. */
@@ -20,9 +20,11 @@ export function Environment({ config, index }: { config: ConfigView; index: numb
       <dl className="kv-list mono">
         <div><dt>PLEX_BASE_URL</dt><dd>{config.secrets.plex_base_url ?? <span className="faint">unset</span>}</dd></div>
         <div><dt>PLEX_TOKEN</dt><dd><Presence set={config.secrets.plex_token} /></dd></div>
-        <div><dt>PLEX_PASSWORD</dt><dd><Presence set={config.secrets.plex_password} legacy /></dd></div>
+        <div><dt>PLEX_PASSWORD</dt><dd><Presence set={config.secrets.plex_password} quiet="legacy" /></dd></div>
         <div><dt>PLEX_SERVER_NAME</dt><dd>{config.secrets.plex_server_name ?? <span className="faint">unset</span>}</dd></div>
         <div><dt>TMDB_API_KEY</dt><dd><Presence set={config.secrets.tmdb_api_key} /></dd></div>
+        <div><dt>ARR_METADATA_URL</dt><dd>{config.secrets.ams_url ?? <span className="faint">unset</span>}</dd></div>
+        <div><dt>ARR_METADATA_API_KEY</dt><dd><Presence set={config.secrets.ams_api_key} quiet="optional" /></dd></div>
         <div><dt>PLEX_COLLECTION_PREFIX</dt><dd>{config.secrets.collection_prefix ? <code>{config.secrets.collection_prefix}</code> : <span className="faint">none</span>}</dd></div>
         <div><dt>TMDB_LANGUAGE</dt><dd>{config.providers.tmdb_language}</dd></div>
         <div><dt>PAG_CONCURRENCY</dt><dd>{config.providers.concurrency}</dd></div>

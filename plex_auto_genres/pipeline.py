@@ -248,7 +248,10 @@ class Pipeline:
                     if progress is not None:
                         progress(outcome)
                 if self._nothing_is_answering(report, pool, by_hand):
+                    # What a refusing source said is the likeliest reason.
+                    refusals = pool.refusals() if pool is not None else ""
                     report.error = (
+                        f"{refusals + ' ' if refusals else ''}"
                         f"Stopped after {GIVE_UP_AFTER} titles no source could answer, with "
                         "nothing at all getting through. The rest of the library was left "
                         "untouched, and the next run carries on from there."
@@ -256,6 +259,14 @@ class Pipeline:
                     log.warning("%s: %s", report.library, report.error)
                     await self._settle(scope, tasks, pool, writer, close=False, tallied=tallied)
                     return
+            if pool is not None and pool.refused and report.error is None:
+                # Said on the run as well as on each title it left waiting:
+                # it is for the person running it to let this app in.
+                report.error = (
+                    f"{pool.refusals()} The rest of the run went without "
+                    f"{' and '.join(sorted(pool.refused))}, and the titles left without an "
+                    "answer wait for the next run."
+                )
         except asyncio.CancelledError:
             report.cancelled = True
             await self._settle(scope, tasks, pool, writer, close=True, tallied=tallied)
@@ -567,11 +578,12 @@ class Pipeline:
             use_keywords=run.use_keywords,
             external_ids=external_ids,
             pinned=pinned,
+            plex_type=item.kind,
         )
 
         def honours_pin(provider: Provider) -> bool:
             """Can this source consume any of the ids the binding reaches?"""
-            return any(e.scheme in provider.guid_schemes for e in pinned)
+            return any(e.scheme in provider.resolution_order(request) for e in pinned)
 
         errors: list[str] = []
         providers: list[Provider] = list(pool.providers)
@@ -583,20 +595,29 @@ class Pipeline:
             # protecting only the merge path left the default one free to
             # write back the very match the binding overrode, whenever the
             # pinned source happened to be rate limited.
-            live = [p for p in providers if honours_pin(p)]
-            if not live:
+            asked = [p for p in providers if honours_pin(p)]
+            if not asked:
                 raise ProviderNotFound(
                     f"pinned {', '.join(str(e) for e in binding)}, which none of "
                     f"{', '.join(p.name for p in providers)} can read: remove the "
                     "binding, or give the library a source that reads it"
                 )
             # A pinned source is asked even while it stands down: there is no
-            # one else to ask.
-            silent = False
+            # one else to ask. Not one that refused this app, which would only
+            # refuse again.
+            live = [p for p in asked if p.name not in pool.refused]
         else:
+            asked = providers
             live = pool.usable(providers)
-            #: A source standing down counts as silent without being asked.
-            silent = len(live) < len(providers)
+        #: A source standing down, or refusing, counts as silent without being asked.
+        silent = len(live) < len(asked)
+        # One that refused this app says why on every title it misses.
+        errors.extend(pool.refused[p.name] for p in asked if p.name in pool.refused)
+        if run.provider_mode == "merge" and any(p.name in pool.refused for p in asked):
+            # A merge is complete only with every source it asks, and this one
+            # will not answer this run: asking the others would only throw
+            # their answers away. A title pinned elsewhere does not ask it.
+            raise ProviderUnavailable("; ".join(errors))
         answered = False
 
         replies = await self._collect(live, request, pool, merge=run.provider_mode == "merge")
@@ -610,14 +631,16 @@ class Pipeline:
             elif not reply.result.genres:
                 answered = True
                 errors.append(f"{reply.result.provider}: nothing to write for this title")
-        if found and not (silent and run.provider_mode == "merge"):
-            # Merging is a promise that every source contributed. One of them
-            # being unreachable makes the answer incomplete, and caching it
-            # would freeze the title on a subset of its sources for good, so
-            # it is deferred instead and completed on the next run.
+        detail = "; ".join(errors)
+        if found:
+            if silent and run.provider_mode == "merge":
+                # Merging is a promise that every source contributed. One of
+                # them not answering makes the answer incomplete, and caching
+                # it would freeze the title on a subset of its sources for
+                # good, so it is deferred instead and completed on the next run.
+                raise ProviderUnavailable(detail or "a source did not answer")
             return found[0] if len(found) == 1 else merge_results(found)
 
-        detail = "; ".join(errors)
         if silent and not answered:
             # Nobody said this title does not exist -- they just did not
             # answer. Raising "not found" here is what used to cache a live
@@ -625,6 +648,11 @@ class Pipeline:
             # basing this on "somebody was silent" alone turned every genuine
             # miss into a deferral for as long as any source stood down.
             raise ProviderUnavailable(detail or "no source was reachable")
+        if any(p.name in pool.refused for p in asked):
+            # Not for a source that refused this app, which will not answer
+            # until it is let in: the title could be one only it has, and a
+            # miss cached now would hide it behind the backoff once it is.
+            raise ProviderUnavailable(detail)
         raise ProviderNotFound(detail or "no provider could resolve this title")
 
     async def _collect(
@@ -676,10 +704,11 @@ class Pipeline:
             pool.note_reachable(provider)
             return Reply(error=str(exc), answered=True)
         except ProviderAuthError as exc:
-            # Reachable, just refusing our key. No verdict, but retrying will
-            # not produce one either.
-            pool.note_reachable(provider)
-            return Reply(error=str(exc))
+            # Refusing this app, not answering about the title: no verdict to
+            # cache, and none to be had from it this run. Counted as silent,
+            # so the title waits for the next run rather than failing.
+            pool.note_refused(provider, str(exc))
+            return Reply(error=str(exc), silent=True)
         except ProviderError as exc:
             pool.note_unreachable(provider, str(exc))
             return Reply(error=str(exc), silent=True)

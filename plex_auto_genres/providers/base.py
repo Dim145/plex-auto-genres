@@ -47,6 +47,17 @@ class LookupRequest:
     #: *scheme*, not a provider, so each provider takes whichever one it can
     #: consume -- an AniDB pin reaches Jikan as the MAL id it maps to.
     pinned: list[ExternalId] = field(default_factory=list)
+    #: What Plex says the item is, ``movie`` or ``show``, when it is known. A
+    #: library's type says how to tag it, not what it holds: an anime library
+    #: is as often a section of films.
+    plex_type: str | None = None
+
+    @property
+    def is_film(self) -> bool:
+        """A film: by what Plex holds the item as where it says, else by its library."""
+        if self.plex_type in ("movie", "show"):
+            return self.plex_type == "movie"
+        return self.media_type.is_movie
 
     def id_for(self, *schemes: str) -> ExternalId | None:
         """The first external id matching any of ``schemes``, in that order."""
@@ -223,6 +234,24 @@ class Provider(abc.ABC):
     def handles(self, media_type: MediaType) -> bool:
         return media_type in self.supports
 
+    @classmethod
+    def schemes_for(cls, media_type: MediaType) -> tuple[str, ...]:
+        """The id schemes a library of this type resolves by here, best first.
+
+        A class method, so the pins a library may take can be listed without
+        building a source -- or holding its credentials.
+        """
+        del media_type  # the same for every type, unless a source says otherwise
+        return cls.guid_schemes
+
+    def resolution_order(self, request: LookupRequest) -> tuple[str, ...]:
+        """The id schemes to resolve this request by, best first.
+
+        Those of its library type, unless the source can tell more from the
+        item itself -- a film in a library typed for series, say.
+        """
+        return self.schemes_for(request.media_type)
+
     @abc.abstractmethod
     async def fetch_by_id(self, external_id: ExternalId, request: LookupRequest) -> ProviderResult:
         """Resolve an exact provider id. Raises :class:`ProviderNotFound` if absent."""
@@ -241,13 +270,14 @@ class Provider(abc.ABC):
         Reading the id off the Plex GUID is the single biggest accuracy win
         over v1, which always searched by title and blindly took result [0].
         """
-        pin = request.pinned_for(*self.guid_schemes)
+        schemes = self.resolution_order(request)
+        pin = request.pinned_for(*schemes)
         if pin is not None:
             result = await self.fetch_by_id(pin, request)
             result.matched_by = "binding"
             return result
 
-        direct = request.id_for(*self.guid_schemes)
+        direct = request.id_for(*schemes)
         if direct is not None:
             try:
                 result = await self.fetch_by_id(direct, request)

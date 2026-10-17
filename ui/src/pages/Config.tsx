@@ -1,5 +1,5 @@
 import { Plus } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { ApiError, api, useConfig, useHealth, useLibraries, useSaveConfig, useSchema } from "../api/client";
 import type { ConfigDocument, GenreRules, LibraryRun, MediaType, ScheduleSettings, ValidationIssue } from "../api/types";
@@ -60,6 +60,13 @@ export default function Config() {
   const confirm = useConfirm();
   const toast = useToast();
   const { setDirty } = useUnsaved();
+  // What the sources need from the environment and do not have, so a
+  // library editor can say so where a source is chosen.
+  const missingSettings = useMemo(() => {
+    const secrets = config.data?.secrets;
+    if (!secrets) return [];
+    return [...(secrets.tmdb_api_key ? [] : ["TMDB_API_KEY"]), ...(secrets.ams_url ? [] : ["ARR_METADATA_URL"])];
+  }, [config.data]);
 
   const [draft, setDraft] = useState<ConfigDocument | null>(null);
   const [baseline, setBaseline] = useState<ConfigDocument | null>(null);
@@ -271,6 +278,7 @@ export default function Config() {
             errors={issuesUnder(errors, ["libraries", i])}
             help={help}
             plexSections={unconfiguredSections}
+            missing={missingSettings}
             onChange={(next) => setLibraries(draft.libraries.map((l, j) => (j === i ? next : l)))}
             onRemove={() => void removeLibrary(i)}
             onMove={(delta) => moveLibrary(i, delta)}

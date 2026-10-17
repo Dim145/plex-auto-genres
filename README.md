@@ -14,7 +14,7 @@ as Plex genre tags or as collections.
 
 | | |
 |---|---|
-| **Genres from three sources** | TMDB for films and TV, Jikan and AniList for anime. Providers are tried in order until one answers. |
+| **Genres from four sources** | TMDB for films and TV, Jikan and AniList for anime, and your own arr-metadata-server catalogue for any of them. Providers are tried in order until one answers. |
 | **Uses the ids Plex already has** | Reads `tmdb://`, `mal://`, `anidb://`… straight off the Plex item, so no title search and no wrong match. |
 | **Genre tags or collections** | Per library. |
 | **Reversible** | Every write is snapshotted. `plex-auto-genres undo <run-id>` puts it back. |
@@ -290,6 +290,8 @@ Four things keep a bad day from becoming a bad library:
 - A source that has stopped answering is stood down for a moment, so the rest
   of the run goes straight to the next one. With nothing left to ask, the run
   stops early and says so, rather than grinding through thousands of titles.
+- A source that refuses this app outright — a key it does not take, an address
+  it does not let in — sits out the rest of the run, after saying why once.
 
 **AniList in particular.** Its documentation says 90 requests a minute; the API
 has been "in a degraded state" for a long time and actually serves 30, which is
@@ -380,6 +382,66 @@ at 70% or more are written. That is why a tag you can see on its page may not re
 Plex. `ANILIST_TAG_RANK` moves the bar: set it to `20` to take much more of what
 AniList knows, and accept the noise that comes with it.
 
+### Your own catalogue: arr-metadata-server
+
+`ams` reads genres from an **arr-metadata-server**, the self-hosted metadata server that
+answers Sonarr, Radarr and Plex from a catalogue of its own: TMDB's, TheTVDB's and the arr
+services' data merged, with every correction locked there by hand winning over what the
+sources say. Those corrections are what this source brings. It holds films, series and
+anime, so any library can read from it, alone or ahead of the others:
+
+```jsonc
+{ "library": "Films", "type": "standard-movie", "providers": ["ams", "tmdb"] }
+```
+
+It is asked through the metadata provider it serves Plex (`/plex`): a film by its TMDB or
+IMDb id, a series by its TheTVDB or TMDB id — whatever the library's type, an item Plex
+holds as a film is asked for as one — and anything else by title and year. An item Plex
+matched with arr-metadata-server's own agent is asked for by the key that agent gave it, so
+even a work made by hand there, with no id anywhere else, is found. A work asked for by id
+is fetched and kept in the catalogue, as when Plex asks; a title search goes that far only
+for the same title — case and accents aside — from a year either side of the item's, never
+for the nearest guess. A work the server finds under another of its titles, or an item with
+no year, is left to the next source, or to a binding.
+
+1. **`ARR_METADATA_URL`** is the server's address as this app reaches it — not through a
+   reverse proxy, which the server's own guide keeps `/plex` off. Two containers on one
+   Docker network reach it by name, `http://arr-metadata-server:8080`; otherwise use the
+   host's address and the published port. The address its **Keys & network** page gives
+   Plex, ending in `/plex`, works too. A user and password in it are sent as basic auth,
+   and never shown.
+2. **Let this app in.** The provider admits callers by address (`AMS_PLEX_AUTH=allowlist`,
+   its default): add the address the server sees this app call from under **Keys &
+   network › Allowed addresses**, beside Plex's — this container's on a shared network, or
+   the Docker host's through a published port. That list also opens Sonarr's and Radarr's
+   routes, and a whole network on it lets in everything that can reach them: allow the one
+   address. A refused call is listed under **Who has been calling**, with a button that
+   allows it. A server that asks for a key instead (`AMS_PLEX_AUTH=apikey`) takes one issued
+   there in `ARR_METADATA_API_KEY`.
+3. **Check it** from the console: **Config › Checks** asks the provider's manifest and says
+   what is still in the way — an address it refuses, a name it does not answer to
+   (`AMS_ALLOWED_HOSTS`), a provider switched off, a redirect, a server that is not
+   arr-metadata-server. The container's own start-up check runs offline and only sees that
+   the address is set; `docker exec <container> plex-auto-genres doctor` asks from where
+   the app runs.
+
+A source that refuses this app sits out the rest of the run, and says why: once in the log,
+and on the run's report. The others answer in its place, and a title none of them has
+waits for the next run rather than failing: it may be one only the refusing source holds.
+In a library that merges its sources, a title that would need it waits too, without the
+others being asked for it; one pinned to another source, or decided by hand, goes ahead.
+
+A run asks again only for what changed on this side, so a correction locked in the
+catalogue after a title was tagged — or a title another source answered while this one
+refused — reaches Plex once the title is asked again: **Forget** it in the library browser,
+or run the library with `--force`.
+
+The genres are named as the catalogue keeps them, in its language: a `replace` rule bridges
+a French catalogue and English-only sources, as below. It has no keywords, so `useKeywords`
+reads TMDB's or AniList's. A run asks it 240 times a minute at most, under half the 600 the
+server allows an address by default — a budget Plex and the arr apps share when they call
+from the same address.
+
 ### When two sources spell one genre differently
 
 Genres are compared on letters and digits alone, so `Rock 'n' Roll`, `Rock n Roll` and
@@ -402,7 +464,9 @@ agree with MyAnimeList and AniList, which are English-only.
 | `PLEX_BASE_URL`, `PLEX_TOKEN` | Preferred auth. [Finding your token](https://support.plex.tv/articles/204059436) |
 | `PLEX_USERNAME`, `PLEX_PASSWORD`, `PLEX_SERVER_NAME` | Legacy auth, used only if no token |
 | `PLEX_COLLECTION_PREFIX` | Prepended to every tag this tool writes |
-| `TMDB_API_KEY` | Required for `standard-tv` / `standard-movie` |
+| `TMDB_API_KEY` | Required by a library reading from `tmdb`, the default for `standard-tv` / `standard-movie` |
+| `ARR_METADATA_URL` | The arr-metadata-server a library reading from `ams` asks |
+| `ARR_METADATA_API_KEY` | A key issued by that server, only if its Plex provider asks for one |
 | `PAG_CONCURRENCY` | Parallel provider lookups (default 4) |
 | `CRON_SCHEDULE`, `RUN_ON_START`, `TZ` | Container scheduling |
 

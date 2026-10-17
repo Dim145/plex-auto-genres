@@ -93,9 +93,24 @@ def test_config_never_leaks_secret_values(client):
     assert body["secrets"] == {
         "plex_token": True, "plex_password": False, "tmdb_api_key": True,
         "plex_base_url": "http://plex:32400", "plex_server_name": None, "collection_prefix": "",
+        "ams_url": None, "ams_api_key": False,
     }
     text = json.dumps(body)
     assert '"t"' not in text and '"k"' not in text
+
+
+def test_the_arr_metadata_server_is_shown_without_its_credentials(client, config_file, monkeypatch):
+    monkeypatch.setenv("ARR_METADATA_URL", "http://someone:hunter2@ams.local:8080/plex")
+    monkeypatch.setenv("ARR_METADATA_API_KEY", "ams_not_for_the_page")
+    time.sleep(0.02)
+    config_file.write_text(config_file.read_text() + "\n")  # read again, with that environment
+
+    body = client.get("/api/v1/config").json()
+
+    assert body["secrets"]["ams_url"] == "http://ams.local:8080"
+    assert body["secrets"]["ams_api_key"] is True
+    text = json.dumps(body)
+    assert "hunter2" not in text and "someone" not in text and "ams_not_for_the_page" not in text
 
 
 def test_config_uses_the_file_s_own_key_names(client):

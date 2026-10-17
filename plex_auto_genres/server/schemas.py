@@ -60,6 +60,10 @@ class Secrets(BaseModel):
     plex_base_url: str | None
     plex_server_name: str | None
     collection_prefix: str
+    #: The arr-metadata-server the ``ams`` source asks, without any
+    #: credentials its address might carry.
+    ams_url: str | None = None
+    ams_api_key: bool = False
 
 
 class ConfigView(BaseModel):
@@ -295,6 +299,9 @@ class ItemView(BaseModel):
     media_key: str
     title: str
     year: int | None = None
+    #: What Plex holds the item as. A library's type says how to tag it, not
+    #: what it is: an anime library is as often a section of films.
+    kind: Literal["movie", "show"] | None = None
     thumb: str | None = Field(default=None, description="Proxied poster path, or null.")
     guids: list[str] = Field(default_factory=list)
     match: MatchSource
@@ -387,6 +394,6 @@ class BindingIn(BaseModel):
 
     library: str = Field(min_length=1)
     media_key: str = Field(min_length=1)
-    provider: Literal["tmdb", "mal", "anilist", "anidb", "tvdb", "imdb"]
+    provider: Literal["tmdb", "mal", "anilist", "anidb", "tvdb", "imdb", "ams"]
     provider_id: str = Field(min_length=1)
     note: str | None = Field(default=None, max_length=500)

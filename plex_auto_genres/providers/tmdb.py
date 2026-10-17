@@ -68,10 +68,12 @@ class TmdbProvider(Provider):
         return {"api_key": self._api_key, "language": self._language, **extra}
 
     @staticmethod
-    def _segment(media_type: MediaType) -> str:
-        # Anime searches TMDB's TV catalogue, which is where series live; an
-        # anime *film* library is better typed standard-movie.
-        return "movie" if media_type.is_movie else "tv"
+    def _segment(request: LookupRequest) -> str:
+        # What Plex holds the item as, where it says: an anime library is as
+        # often a section of films, whose ids are TMDB's film ids. Without a
+        # word from Plex, anime is looked for among the series, where most of
+        # it lives.
+        return "movie" if request.is_film else "tv"
 
     async def fetch_by_id(self, external_id: ExternalId, request: LookupRequest) -> ProviderResult:
         tmdb_id = (
@@ -79,7 +81,7 @@ class TmdbProvider(Provider):
             if external_id.scheme == "tmdb"
             else await self._cross_reference(external_id, request)
         )
-        segment = self._segment(request.media_type)
+        segment = self._segment(request)
         # append_to_response folds the keywords lookup into the details call,
         # halving the round trips v1 needed.
         payload = await self.transport.get_json(
@@ -97,7 +99,7 @@ class TmdbProvider(Provider):
         source = EXTERNAL_SOURCES.get(external_id.scheme)
         if source is None:   # pragma: no cover - guarded by guid_schemes
             raise ProviderNotFound(f"tmdb: {external_id.scheme} ids cannot be looked up")
-        segment = self._segment(request.media_type)
+        segment = self._segment(request)
         payload = await self.transport.get_json(
             f"{BASE_URL}/find/{external_id.value}",
             params=self._params(external_source=source),
@@ -109,11 +111,11 @@ class TmdbProvider(Provider):
         return str(found["id"])
 
     async def search(self, request: LookupRequest) -> ProviderResult:
-        segment = self._segment(request.media_type)
+        segment = self._segment(request)
         params = self._params(query=request.title, include_adult=True)
         if request.year:
             # TMDB spells the year filter differently per endpoint.
-            params["year" if request.media_type.is_movie else "first_air_date_year"] = request.year
+            params["year" if request.is_film else "first_air_date_year"] = request.year
 
         payload = await self.transport.get_json(f"{BASE_URL}/search/{segment}", params=params)
         results = payload.get("results") or []
@@ -146,7 +148,7 @@ class TmdbProvider(Provider):
         return self._to_result(details, request, str(tmdb_id))
 
     async def search_candidates(self, request: LookupRequest, limit: int = 8) -> list[Candidate]:
-        segment = self._segment(request.media_type)
+        segment = self._segment(request)
         params = self._params(query=request.title, include_adult=True)
         payload = await self.transport.get_json(f"{BASE_URL}/search/{segment}", params=params)
         results: list[dict] = payload.get("results") or []
@@ -170,7 +172,7 @@ class TmdbProvider(Provider):
         return out
 
     def _to_result(self, payload: dict, request: LookupRequest, tmdb_id: str) -> ProviderResult:
-        segment = self._segment(request.media_type)
+        segment = self._segment(request)
         title = payload.get("title") or payload.get("name") or request.title
 
         genres = split_compound_genres(
@@ -179,7 +181,7 @@ class TmdbProvider(Provider):
         if request.use_keywords:
             block = payload.get("keywords") or {}
             # /movie/{id} nests the list under "keywords"; /tv/{id} under "results".
-            raw = block.get("keywords") if request.media_type.is_movie else block.get("results")
+            raw = block.get("keywords") if request.is_film else block.get("results")
             # Plenty of titles carry none. Handing back nothing would tag them
             # with nothing and record a failure, so the genres stand in: the
             # setting asks for the finer vocabulary where there is one.

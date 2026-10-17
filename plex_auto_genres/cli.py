@@ -55,7 +55,7 @@ DEFAULT_CONFIG = "config/config.json"
 
 #: Id schemes a binding may name. Which of them a given library can actually
 #: resolve is checked against its sources when the binding is set.
-BINDABLE_SCHEMES = ["tmdb", "mal", "anilist", "anidb", "tvdb", "imdb"]
+BINDABLE_SCHEMES = ["tmdb", "mal", "anilist", "anidb", "tvdb", "imdb", "ams"]
 
 #: How every command that names an item takes it. A title is looked up in the
 #: cache: most items are keyed by a GUID, which nobody types.
@@ -69,7 +69,9 @@ def _add_binding_parsers(sub) -> None:
     bind.add_argument("library")
     bind.add_argument("title", help=ITEM_HELP)
     bind.add_argument("provider", choices=BINDABLE_SCHEMES)
-    bind.add_argument("provider_id")
+    bind.add_argument("provider_id", help="The id on that source; for ams, the key "
+                                          "its Plex provider names the work by, such as "
+                                          "movie-tmdb-603 or show-tvdb-81189.")
     bind.add_argument("--note", help="Free-text reminder of why this binding exists.")
 
     unbind = sub.add_parser("unbind", help="Remove an item's manual bindings.")

@@ -138,6 +138,7 @@ def browser(tmp_path, config_file, monkeypatch):
     items[0].thumb = "/library/metadata/1/thumb/9"
     loose = FakePlexItem(3, "Loose Cannon", 1999)      # no usable GUID -> search
     loose.guids = []
+    loose.type = "movie"     # a film in an anime library
     items.append(loose)
     server.url = lambda path, includeToken=True: f"http://plex:32400{path}?X-Plex-Token=t"
     with TestClient(app) as c:
@@ -173,6 +174,8 @@ def test_items_page_joins_match_state_and_bindings(browser):
     loose = by_title["Loose Cannon"]
     assert loose["match"] == "search" and loose["state"] is None
     assert loose["media_key"] == "Loose Cannon (1999)"
+    # What Plex holds it as, so a pin is searched for among films.
+    assert loose["kind"] == "movie" and one["kind"] is None
 
 
 def test_items_filter_search_and_paginate(browser):

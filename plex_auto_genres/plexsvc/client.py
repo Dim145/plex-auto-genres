@@ -12,6 +12,7 @@ from plexapi.server import PlexServer
 from ..config import PlexSettings
 from ..errors import PlexConnectionError
 from ..models import KNOWN_GUID_SCHEMES, ExternalId, MediaItem
+from ..providers.ams import agent_guid
 
 log = logging.getLogger(__name__)
 
@@ -36,6 +37,11 @@ def parse_guid(raw: str) -> ExternalId | None:
     """
     if not raw or "://" not in raw:
         return None
+    # arr-metadata-server's agent names the work by the key its provider
+    # gave it, which only the ams source reads.
+    own = agent_guid(raw)
+    if own is not None:
+        return own
     scheme, _, value = raw.partition("://")
     scheme = scheme.strip().lower()
     value = value.split("?", 1)[0].strip()
@@ -143,6 +149,7 @@ def iter_library(server: PlexServer, library: str, *, page_size: int = 200) -> l
                 current_collections=collections,
                 locked_fields=locked,
                 thumb=getattr(raw, "thumb", None) or None,
+                kind=getattr(raw, "type", None) or None,
                 handle=raw,
             )
         )

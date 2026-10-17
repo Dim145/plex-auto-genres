@@ -13,7 +13,13 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .. import __version__
-from ..config import DEFAULT_PROVIDERS, config_json_schema, validate_document, write_config
+from ..config import (
+    DEFAULT_PROVIDERS,
+    config_json_schema,
+    shown_address,
+    validate_document,
+    write_config,
+)
 from ..doctor import run_doctor
 from ..errors import ConfigError, PlexConnectionError, ProviderError
 from ..jobs import Job, JobConflict, JobError, JobManager, JobOptions
@@ -136,6 +142,8 @@ async def get_config(request: Request) -> schemas.ConfigView:
             plex_base_url=config.plex.base_url,
             plex_server_name=config.plex.server_name,
             collection_prefix=config.plex.collection_prefix,
+            ams_url=shown_address(config.providers.ams_url),
+            ams_api_key=bool(config.providers.ams_api_key),
         ),
         providers={
             "tmdb_language": config.providers.tmdb_language,
@@ -526,6 +534,7 @@ async def library_items(
             media_key=key,
             title=item.title,
             year=item.year,
+            kind=item.kind if item.kind in ("movie", "show") else None,  # type: ignore[arg-type]
             thumb=item.thumb,
             guids=[str(g) for g in item.guids],
             match=_match_source(  # type: ignore[arg-type]
@@ -616,6 +625,10 @@ async def search_candidates(
     provider: str | None = None,
     year: int | None = Query(default=None, ge=1800, le=2100),
     limit: int = Query(default=8, ge=1, le=20),
+    kind: Literal["movie", "show"] | None = Query(
+        default=None,
+        description="What Plex holds the item as, where its library's type does not say.",
+    ),
 ) -> list[schemas.CandidateView]:
     """Ranked suggestions from one provider, for picking a binding by hand."""
     state = _state(request)
@@ -625,7 +638,9 @@ async def search_candidates(
         pool = build_providers((name,), type, config.providers)
     except (ConfigError, ProviderError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    lookup = LookupRequest(title=q, year=year, media_type=type)
+    # A film in an anime library is searched for among films: a series' key
+    # pinned on it would be refused on every run.
+    lookup = LookupRequest(title=q, year=year, media_type=type, plex_type=kind)
     async with pool:
         try:
             found = await pool.providers[0].search_candidates(lookup, limit=limit)

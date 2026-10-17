@@ -890,6 +890,110 @@ WAL replayed onto the copy, partial copies colliding across PID namespaces, a 2.
 that handed the image root to the app user. One pre-existing problem was left for its
 own change: `PUID`/`PGID` with a leading zero are read as octal.
 
+### Your own catalogue as a source — done
+
+Asked for: arr-metadata-server as a metadata source. It keeps a catalogue of its own —
+TMDB, TheTVDB and the arr services merged — where a correction locked by hand outranks
+every source, and it serves that catalogue under several surfaces. The choice of surface
+decides what the source is worth:
+
+* Its **TMDB relay** (`/3`) takes a key issued there, so it would only have needed a base
+  URL on the TMDB source. But it writes a locked genre into TMDB's answer only where TMDB
+  has a name for it, and only in the catalogue's language: the corrections that matter
+  most would not come through.
+* Its **native API** answers by its own ids and searches by title alone; nothing there
+  looks a work up by the ids Plex items carry.
+* Its **Plex provider** (`/plex`) does exactly that, for films and series alike, answers
+  with the catalogue's genres — every lock included — and names the work by a key Plex
+  keeps in the item's GUID when its agent made the match. That is the surface asked. Its
+  cost is that it admits callers by address, as it does Plex: this app's address goes on
+  the server's list. A key is sent as well, for a server set to ask for one.
+
+The source, `ams`:
+
+* Resolves a film by its key, then TMDB's id, then IMDb's; a series by its key, then
+  TheTVDB's — which settles its numbering on that server — then TMDB's. The provider has
+  no key for a series by IMDb, and its match by that id only reaches what the catalogue
+  already holds, so an IMDb id rides along with a title search instead and is never a pin
+  a series library is offered. `schemes_for` became a class method so the pins a library
+  takes can be listed without credentials, in the order they are tried.
+* Asks for an item as what Plex says it is (`plex_type`, from the listing), not as its
+  library's type: an anime library is as often a section of films, and a film's ids asked
+  for as a series' would fetch an unrelated series into the server's catalogue for good.
+* Asking for a key fetches the work into that catalogue and keeps it, so a title search
+  reads a match by key only when the match shares one of the item's ids, or has its title
+  — case and accents aside, as the server compares titles — from a year either side of the
+  item's. An item with no year takes no title match at all. The nearest guess for a home
+  video stays out; a work matched under another of its titles, which the answer does not
+  carry, is left to the next source or to a binding.
+* Keeps the catalogue's genres as it names them — the server splits TMDB's compound
+  genres itself, and a name locked by hand, "Sword & Sorcery", stays whole. It has no
+  keywords, takes TMDB's audience rating (else IMDb's) as the score, and asks at most 240
+  times a minute: the server's 600 per address is one budget across its routes, shared
+  with Plex and the arr apps calling from the same address.
+* Takes a user and password written into `ARR_METADATA_URL` as basic auth, so no address
+  it quotes — in a log line, a title's recorded error, the doctor — carries them. A
+  redirect is named rather than followed (a redirected search would come back a GET);
+  `doctor` asks the manifest online and tells apart a refused address, a host name the
+  server does not answer to, a switched-off provider, a redirect and a server that is not
+  this one. An address it cannot use is refused where it is used — by a library reading
+  `ams`, by the doctor — never while the config loads, where it would have stopped every
+  library.
+* Parses the GUID arr-metadata-server's own Plex agent writes,
+  `tv.plex.agents.custom.arrmetadataserver://movie/movie-tmdb-603`, into an `ams` id, so a
+  work made by hand there is found. Media keys do not change, and `ams` is not a scheme
+  they or a typed item key can take.
+
+A source refusing this app — a key, an address — used to be asked again for every title,
+and its titles were cached as misses behind a backoff. It now sits out the rest of the run
+after saying why, once in the log and on the run's report: a pinned title does not ask it
+again, and an answer already in flight when it refused does not let it back in. A title the
+other sources all miss is deferred rather than failed, since the refusing source may be the
+one that holds it. In a library that merges its sources, a title whose sources include it
+is deferred before anything is asked, rather than asking the others for answers thrown
+away; a title pinned to another source, or decided by hand, goes ahead. Stopping the whole
+run instead — tried first — also stopped what needs no source: locked items, titles pinned
+elsewhere, a ratings pass from the cache, and it miscounted the titles it cancelled
+mid-write. TMDB with a wrong key behaves the same way. A merge that a source could not
+answer is deferred too when a third had no record of the title; it used to be failed.
+
+Both `ams` and `tmdb` ask for an item as what Plex holds it as (`plex_type`, the item's
+`kind` in the listing). TMDB used to look for everything in an anime library among its
+series, so a film's id fetched another work — and once the picker searched by kind, a pin
+TMDB read as a series' id was read by `ams` as a film's. The console's binding picker passes
+the item's kind with its search: it searched series for a film in an anime library, so the
+key pinned was a series' and was refused on every run. An anime library reading `ams` takes
+TheTVDB and IMDb pins alike, since it may be a section of either; an AniDB pin is offered
+only where a source reads the MAL or AniList id it translates to.
+
+The **Reads from** field outgrew its presets: four sources, any order, any type. It is now
+an ordered list — each source moved, dropped, or added from those its type allows — that
+goes back to `null` when it matches the default, and says where a source is chosen when
+the setting it needs (`TMDB_API_KEY`, `ARR_METADATA_URL`) is missing. Its arrows are
+aria-disabled rather than disabled so a moved source keeps the focus, and an added or
+dropped one hands it to what now stands for it. The tall list showed a layout fault the
+presets had hidden: a field's grid rows stretched to a taller neighbour, so a single-row
+control grew to fill the cell. Fields are now aligned to their start.
+
+Reviewed by three passes — the provider against the server's own code, integration and
+the console, docs and tests — whose eighteen findings were fixed, among them pins of the
+new scheme refused by the API and the CLI, credentials quoted in errors, a malformed
+address stopping every library, films in anime libraries fetching unrelated series into
+the catalogue, loose title guesses kept there, locked compound genres split apart, and a
+request rate that spent the server's whole budget. A fourth pass over those fixes found
+eight more, fixed as well: a merging library deferring every title behind a refusal without
+ever stopping, an address with a port or a host the parser rejects escaping as another kind
+of error (and one of Python's messages quoting the password), accents turning away the
+server's own title matches, an item with no year taking any work of its title, the binding
+picker searching series for a film, a refusal lifted by an answer already in flight, a miss
+cached while the refusing source might hold the title, and no word on how a correction made
+on the server after a title was tagged reaches Plex. A fifth pass over those found that the
+run-wide stop starved what needs no source, as above; that TMDB still asked an anime library
+by its type; that AniDB pins were offered to libraries nothing translates them for; and that
+an issued key with a stray blank came back quoted whole in the HTTP library's error. Fixed
+too: the key loses the blanks around it and is refused, unquoted, if a header cannot carry
+it.
+
 ### Next
 
 Decide where secrets should live if they are ever to be edited from the UI — the

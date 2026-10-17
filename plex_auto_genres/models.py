@@ -107,6 +107,8 @@ class MediaItem:
     locked_fields: set[str] = field(default_factory=set)
     #: Plex poster path, e.g. ``/library/metadata/123/thumb/456``.
     thumb: str | None = None
+    #: What Plex says it is: ``movie`` or ``show``.
+    kind: str | None = None
     #: The live plexapi object, kept so the writer can edit it.
     handle: object | None = None
 

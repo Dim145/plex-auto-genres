@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -12,7 +13,8 @@ import httpx
 from ..config import ProviderSettings
 from ..errors import ConfigError, ProviderAuthError
 from ..models import MediaType
-from ..ratelimit import ANILIST_LIMITS, JIKAN_LIMITS, TMDB_LIMITS, shared_limiter
+from ..ratelimit import AMS_LIMITS, ANILIST_LIMITS, JIKAN_LIMITS, TMDB_LIMITS, shared_limiter
+from .ams import AmsProvider, key_headers, split_address
 from .anidb_map import AniDbMapper
 from .anilist import AniListProvider
 from .base import HttpTransport, LookupRequest, Provider, USER_AGENT
@@ -32,6 +34,7 @@ MAX_COOLDOWN_S = 300.0
 __all__ = [
     "GUID_SCHEMES",
     "bindable_schemes",
+    "AmsProvider",
     "AniDbMapper",
     "AniListProvider",
     "JikanProvider",
@@ -42,9 +45,12 @@ __all__ = [
     "build_providers",
 ]
 
-_LIMITS = {"jikan": JIKAN_LIMITS, "anilist": ANILIST_LIMITS, "tmdb": TMDB_LIMITS}
+_LIMITS = {
+    "jikan": JIKAN_LIMITS, "anilist": ANILIST_LIMITS, "tmdb": TMDB_LIMITS, "ams": AMS_LIMITS,
+}
 _CLASSES: dict[str, type[Provider]] = {
     "jikan": JikanProvider, "anilist": AniListProvider, "tmdb": TmdbProvider,
+    "ams": AmsProvider,
 }
 
 #: Which Plex GUID schemes each provider resolves without a search. Class
@@ -53,6 +59,7 @@ GUID_SCHEMES: dict[str, tuple[str, ...]] = {
     "jikan": JikanProvider.guid_schemes,
     "anilist": AniListProvider.guid_schemes,
     "tmdb": TmdbProvider.guid_schemes,
+    "ams": AmsProvider.guid_schemes,
 }
 
 
@@ -70,14 +77,15 @@ def bindable_schemes(media_type: MediaType, providers: Iterable[str]) -> list[st
     """
     out: list[str] = []
     for name in providers:
-        for scheme in GUID_SCHEMES.get(name, ()):
+        cls = _CLASSES.get(name)
+        for scheme in cls.schemes_for(media_type) if cls is not None else ():
             if scheme in _SERIES_ONLY and media_type.is_movie:
                 continue
             if scheme not in out:
                 out.append(scheme)
-    if media_type.is_anime and "anidb" not in out:
+    if media_type.is_anime and "anidb" not in out and {"mal", "anilist"} & set(out):
         # Not read directly by anyone: translated to MAL and AniList ids
-        # through the offline mapping table.
+        # through the offline mapping table, so only for a source reading one.
         out.append("anidb")
     return out
 
@@ -107,6 +115,9 @@ class ProviderPool:
         #: this before giving up, because a written item lands in the report
         #: much later than the answer that produced it.
         self.answers = 0
+        #: Sources that refused this app -- a key, an address -- by name, with
+        #: what they said. They sit out the rest of the run.
+        self.refused: dict[str, str] = {}
 
     def usable(self, providers: list[Provider]) -> list[Provider]:
         """Those of ``providers`` not currently standing down."""
@@ -118,7 +129,10 @@ class ProviderPool:
         self.answers += 1
         health = self._health[provider.name]
         health.strikes = 0
-        health.until = 0.0
+        if provider.name not in self.refused:
+            # A refusal holds for the run: an answer to a question put before
+            # it landed says nothing of the next one.
+            health.until = 0.0
 
     def note_unreachable(self, provider: Provider, reason: str) -> bool:
         """Record a transport failure. True when it stands the provider down."""
@@ -138,6 +152,23 @@ class ProviderPool:
             "%s is not answering (%s); leaving it alone for %.0fs", provider.name, reason, pause
         )
         return True
+
+    def note_refused(self, provider: Provider, reason: str) -> None:
+        """The source refused this app. Asking it again, title after title, will
+        not change its mind: it sits out the rest of the run, and says so once.
+        """
+        self._health[provider.name].until = math.inf
+        if provider.name in self.refused:
+            return
+        self.refused[provider.name] = reason
+        log.warning("%s refused this app, so the rest of this run goes without it. %s",
+                    provider.name, reason)
+
+    def refusals(self) -> str:
+        """What the sources that refused this app said, as sentences: empty when none did."""
+        return " ".join(
+            reason if reason.endswith(".") else f"{reason}." for reason in self.refused.values()
+        )
 
     @property
     def request_count(self) -> int:
@@ -181,6 +212,15 @@ def build_providers(
                 "standard-movie libraries, and for an anime library that falls "
                 "back to TMDB."
             )
+        if name == "ams":
+            if not settings.ams_url:
+                raise ConfigError(
+                    "ARR_METADATA_URL is not set. A library that reads from ams needs "
+                    "the address of the arr-metadata-server to ask."
+                )
+            # Refuses an address, or a key, it could not use.
+            split_address(settings.ams_url)
+            key_headers(settings.ams_api_key)
 
     client = httpx.AsyncClient(
         timeout=httpx.Timeout(20.0, connect=10.0),
@@ -205,6 +245,8 @@ def build_providers(
             )
         elif name == "anilist":
             built.append(AniListProvider(transport, tag_rank=settings.anilist_tag_rank))
+        elif name == "ams":
+            built.append(AmsProvider(transport, settings.ams_url or "", settings.ams_api_key))
         else:
             built.append(_CLASSES[name](transport))
     return ProviderPool(built, client)

@@ -42,6 +42,7 @@ PORT = 8095
 os.environ.setdefault("PLEX_BASE_URL", "http://plex.demo.invalid:32400")
 os.environ.setdefault("PLEX_TOKEN", "demo-token")
 os.environ.setdefault("TMDB_API_KEY", "demo-key")
+os.environ.setdefault("ARR_METADATA_URL", "http://ams.demo.invalid:8080")
 os.environ.setdefault("PAG_CONCURRENCY", "3")
 
 # Fictional titles: an adjective, a noun, sometimes a number. No real works,
@@ -92,8 +93,8 @@ class Item:
     writes are visible on the next read, exactly as with a real server."""
 
     def __init__(self, key: int, title: str, year: int, guids: list[str], genres: list[str],
-                 collections: list[str], rating: float | None) -> None:
-        self.ratingKey, self.title, self.year = key, title, year
+                 collections: list[str], rating: float | None, type_: str = "movie") -> None:
+        self.ratingKey, self.title, self.year, self.type = key, title, year, type_
         self.guid = f"plex://item/{key}"
         self.guids = [Guid(g) for g in guids]
         self.genres = [Tag(g) for g in genres]
@@ -231,7 +232,7 @@ def build_sections() -> list[Section]:
             collections = rng.sample(RATING_BUCKETS, 1) if rng.random() < 0.2 else []
             rating = round(rng.uniform(4.5, 9.2), 1) if rng.random() < 0.6 else None
             items.append(Item(rating_key, title_for(rating_key), rng.randint(1994, 2025), guids,
-                              genres, collections, rating))
+                              genres, collections, rating, type_))
         collections = [Collection(key * 1000 + 900 + n, name)
                        for n, name in enumerate(["Action", "Comedy", "Drama", "Adventure", *RATING_BUCKETS])]
         sections.append(Section(key, title, type_, agent, items, collections))
@@ -247,14 +248,14 @@ def build_sections() -> list[Section]:
 def install_fake_providers() -> None:
     from plex_auto_genres.errors import ProviderNotFound, ProviderRateLimited
     from plex_auto_genres.models import Candidate, ProviderResult
-    from plex_auto_genres.providers import anilist, jikan, tmdb
+    from plex_auto_genres.providers import ams, anilist, jikan, tmdb
 
     def rng_for(text: str) -> random.Random:
         return random.Random(int(hashlib.sha256(text.encode()).hexdigest()[:8], 16))
 
     def genres_for(name: str, title: str, keywords: bool) -> list[str]:
         rng = rng_for(f"{name}:{title}")
-        pool = KEYWORDS if keywords else (ANIME_GENRES if name != "tmdb" else TMDB_GENRES)
+        pool = KEYWORDS if keywords else (TMDB_GENRES if name in ("tmdb", "ams") else ANIME_GENRES)
         return rng.sample(pool, rng.randint(1, 4 if not keywords else 9))
 
     async def fake_resolve(self, request):
@@ -299,7 +300,7 @@ def install_fake_providers() -> None:
             ))
         return out
 
-    for cls in (jikan.JikanProvider, anilist.AniListProvider, tmdb.TmdbProvider):
+    for cls in (jikan.JikanProvider, anilist.AniListProvider, tmdb.TmdbProvider, ams.AmsProvider):
         cls.resolve = fake_resolve
         cls.search_candidates = fake_candidates
 

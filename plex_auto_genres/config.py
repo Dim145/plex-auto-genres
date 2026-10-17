@@ -45,7 +45,7 @@ DEFAULT_PROVIDERS: dict[MediaType, tuple[str, ...]] = {
     MediaType.STANDARD_MOVIE: ("tmdb",),
 }
 
-ProviderName = Literal["jikan", "anilist", "tmdb"]
+ProviderName = Literal["jikan", "anilist", "tmdb", "ams"]
 
 #: Sources with a finer vocabulary than their genres, which ``useKeywords``
 #: asks for. Mirrors ``Provider.has_keywords``; a test keeps the two in step,
@@ -201,9 +201,10 @@ class LibraryRun(BaseModel):
         default=None,
         description=(
             "Metadata sources, in preference order. Defaults to ['jikan'] for "
-            "anime and ['tmdb'] otherwise. An anime library may end its list "
-            "with 'tmdb', which needs TMDB_API_KEY and returns TMDB's "
-            "taxonomy, not MAL's."
+            "anime and ['tmdb'] otherwise. An anime library may read 'tmdb' "
+            "too, which needs TMDB_API_KEY and returns TMDB's taxonomy, not "
+            "MAL's. 'ams' reads an arr-metadata-server catalogue, with the "
+            "corrections locked there, for any type; it needs ARR_METADATA_URL."
         ),
     )
     provider_mode: Literal["fallback", "merge"] = Field(
@@ -323,6 +324,12 @@ class ProviderSettings(BaseModel):
 
     tmdb_api_key: str | None = None
     tmdb_language: str = "en-US"
+    #: The arr-metadata-server whose catalogue the ``ams`` source reads: its
+    #: interface's address, the one its Plex provider is under.
+    ams_url: str | None = None
+    #: A key issued by that server, for one whose Plex provider asks for a key
+    #: rather than letting callers in by address.
+    ams_api_key: str | None = None
     #: How much of AniList's community has to agree with a tag before it
     #: counts. AniList shows them all, down to a few percent; taking them all
     #: is noise, and 70 was a guess made with no way for anyone to change it.
@@ -331,6 +338,41 @@ class ProviderSettings(BaseModel):
     concurrency: int = Field(default=4, ge=1, le=32)
     #: Total attempts per item before it is recorded as failed.
     max_attempts: int = Field(default=3, ge=1, le=10)
+
+    @field_validator("ams_url")
+    @classmethod
+    def _server_address(cls, value: str | None) -> str | None:
+        """The server's address, also when given as its Plex provider's.
+
+        The server's own panel shows the provider's address, ``…/plex``, to
+        copy into Plex; that is the address most likely to be pasted here. An
+        address it cannot use is refused where it is used -- by a library that
+        reads from ams, and by the doctor -- never here, where it would stop
+        every library from loading.
+        """
+        value = (value or "").strip().rstrip("/")
+        return value.removesuffix("/plex") or None
+
+    @field_validator("ams_api_key")
+    @classmethod
+    def _issued_key(cls, value: str | None) -> str | None:
+        """The key without the blank an env file or a paste leaves around it."""
+        return (value or "").strip() or None
+
+
+def shown_address(url: str | None) -> str | None:
+    """An address as it may be shown or logged: without a user and password in it.
+
+    Everything before the last ``@`` goes, however the rest is formed: a
+    password holding a stray ``/`` or ``#`` is still never printed. An ``@``
+    in a path loses that much of the path too, which is fine for a display.
+    """
+    if not url:
+        return None
+    scheme, sep, rest = url.partition("://")
+    if not sep:
+        return url.rpartition("@")[2]
+    return f"{scheme}{sep}{rest.rpartition('@')[2]}"
 
 
 class ScheduleSettings(BaseModel):
@@ -461,6 +503,8 @@ def _providers_from_env() -> ProviderSettings:
     return ProviderSettings(
         tmdb_api_key=os.getenv("TMDB_API_KEY") or None,
         tmdb_language=os.getenv("TMDB_LANGUAGE", "en-US"),
+        ams_url=os.getenv("ARR_METADATA_URL") or None,
+        ams_api_key=os.getenv("ARR_METADATA_API_KEY") or None,
         anilist_tag_rank=int(os.getenv("ANILIST_TAG_RANK", "70")),
         concurrency=int(os.getenv("PAG_CONCURRENCY", "4")),
         max_attempts=int(os.getenv("PAG_MAX_ATTEMPTS", "3")),

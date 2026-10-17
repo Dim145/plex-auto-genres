@@ -55,7 +55,7 @@
             "type": "anime",
             "enabled": true,
 
-            "//providers": "Tried in order until one returns genres. anime: jikan, anilist, and optionally tmdb last as a fallback. standard-*: tmdb.",
+            "//providers": "Tried in order until one returns genres. anime: jikan, anilist, and optionally tmdb last as a fallback. standard-*: tmdb. Any type: ams, your arr-metadata-server's catalogue with its corrections (needs ARR_METADATA_URL).",
             "providers": ["jikan", "anilist"],
 
             "//useGenres": "true writes Plex's genre field; false creates collections instead.",

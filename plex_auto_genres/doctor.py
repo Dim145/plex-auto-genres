@@ -11,9 +11,16 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from .config import KEYWORD_PROVIDERS, AppConfig, is_v1_layout, load_config
+from .config import (
+    KEYWORD_PROVIDERS,
+    AppConfig,
+    is_v1_layout,
+    load_config,
+    shown_address,
+)
 from .errors import ConfigError
 from .models import MediaType, guid_key
+from .providers.ams import key_headers, manifest_problem, split_address
 from .store import Store
 from .taxonomy import check_names, fetch_live_genres
 
@@ -95,10 +102,14 @@ def run_doctor(config_path: str, store: Store, *, check_taxonomy: bool = True) -
     if needs_tmdb and not config.providers.tmdb_api_key:
         checks.append(Check(
             "tmdb-key", "error", "TMDB_API_KEY is unset",
-            "Required for standard-tv and standard-movie libraries.",
+            "Required by a library that reads from tmdb, which standard-tv and "
+            "standard-movie libraries do by default.",
         ))
     elif needs_tmdb:
         checks.append(Check("tmdb-key", "ok", "TMDB API key present"))
+
+    if any("ams" in r.resolved_providers for r in config.libraries if r.enabled):
+        checks.append(_ams_check(config, online=check_taxonomy))
 
     if not config.libraries:
         checks.append(Check("libraries", "warn", "No libraries configured"))
@@ -162,6 +173,35 @@ def _config_is_v1(config_path: str) -> bool:
         return is_v1_layout(json.loads(Path(config_path).read_text(encoding="utf-8")))
     except (OSError, ValueError):
         return False
+
+
+def _ams_check(config: AppConfig, *, online: bool) -> Check:
+    """Whether the arr-metadata-server a library reads from can be asked."""
+    url = config.providers.ams_url
+    if not url:
+        return Check(
+            "ams", "error", "ARR_METADATA_URL is unset",
+            "A library reads from ams, which needs the address of the "
+            "arr-metadata-server to ask.",
+        )
+    shown = shown_address(url)
+    try:
+        split_address(url)
+    except ConfigError as exc:
+        return Check("ams", "error", "ARR_METADATA_URL cannot be used", str(exc))
+    try:
+        key_headers(config.providers.ams_api_key)
+    except ConfigError as exc:
+        return Check("ams", "error", "ARR_METADATA_API_KEY cannot be used", str(exc))
+    if not online:
+        return Check(
+            "ams", "ok", "arr-metadata-server address set",
+            f"{shown} -- not asked offline; the checks in the web UI ask it",
+        )
+    problem = manifest_problem(url, config.providers.ams_api_key)
+    if problem is not None:
+        return Check("ams", "error", "arr-metadata-server cannot be asked", problem)
+    return Check("ams", "ok", "arr-metadata-server answers", shown)
 
 
 def _taxonomy_check(config: AppConfig, store: Store) -> Check:

@@ -8,13 +8,19 @@ import { Modal } from "./Modal";
 import { useToast } from "./Toast";
 
 const SEARCHABLE: Record<MediaType, string[]> = {
-  anime: ["jikan", "anilist", "tmdb"],
-  "standard-tv": ["tmdb"],
-  "standard-movie": ["tmdb"],
+  anime: ["jikan", "anilist", "ams", "tmdb"],
+  "standard-tv": ["tmdb", "ams"],
+  "standard-movie": ["tmdb", "ams"],
 };
 
 /** The id scheme a search provider's results bind as. */
-const BIND_AS: Record<string, BindingProvider> = { jikan: "mal", anilist: "anilist", tmdb: "tmdb" };
+const BIND_AS: Record<string, BindingProvider> = { jikan: "mal", anilist: "anilist", tmdb: "tmdb", ams: "ams" };
+
+/** What an id of a scheme looks like, for the field it is typed into. */
+function idExample(scheme: BindingProvider, film: boolean): string {
+  if (scheme === "ams") return film ? "movie-tmdb-603" : "show-tvdb-81189";
+  return scheme === "imdb" ? "tt0133093" : "id";
+}
 
 /**
  * Pick the provider record an item should resolve to. Search first (ranked
@@ -80,7 +86,11 @@ export function BindingPicker({
     setPins(item.bindings);
   }, [item]);
 
-  const candidates = useCandidates(submitted ? { q: submitted.q, type, provider, year: submitted.year } : null);
+  // What Plex holds the item as, where the library's type does not say: an
+  // anime library is as often a section of films, and a series' key pinned on
+  // a film is refused on every run.
+  const film = item?.kind ? item.kind === "movie" : type === "standard-movie";
+  const candidates = useCandidates(submitted ? { q: submitted.q, type, provider, year: submitted.year, kind: item?.kind ?? null } : null);
 
   const search = (e: FormEvent) => {
     e.preventDefault();
@@ -183,7 +193,7 @@ export function BindingPicker({
             <div className="label">Or enter an id</div>
             <div className="picker__manual-row">
               <Segmented name={`${id}-manual`} ariaLabel="Id scheme" value={manualProvider} onChange={setPickedScheme} options={schemes.map((p) => ({ value: p, label: p }))} />
-              <input className="input mono" aria-label="Provider id" value={manualId} onChange={(e) => setManualId(e.target.value)} placeholder="id" />
+              <input className="input mono" aria-label="Provider id" value={manualId} onChange={(e) => setManualId(e.target.value)} placeholder={idExample(manualProvider, film)} />
               <button type="submit" className="button button--ghost" disabled={!manualId.trim() || create.isPending}>
                 Bind
               </button>
