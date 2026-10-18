@@ -21,8 +21,10 @@ services:
       TMDB_API_KEY: "${TMDB_API_KEY:-}"   # not needed for anime-only setups
       # Your arr-metadata-server, for libraries reading from "ams". By name when
       # both containers share a network, else the host's address and port; allow
-      # the address it sees this container call from, under Keys & network.
+      # the address it sees this container call from, under Keys & network -- or,
+      # for a server asking for keys (AMS_PLEX_AUTH=apikey), give it one it issued.
       # ARR_METADATA_URL: "http://arr-metadata-server:8080"
+      # ARR_METADATA_API_KEY: "${ARR_METADATA_API_KEY:-}"
       # --- Mode: "serve" (web UI + scheduler) or "schedule" (headless, as v1).
       # Unset, the image picks serve when a login is configured, else schedule.
       PAG_MODE: "serve"

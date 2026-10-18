@@ -148,7 +148,8 @@ class HttpTransport:
             if response.status_code in (401, 403):
                 self._limiter.note_success()
                 raise ProviderAuthError(
-                    f"{self._name}: HTTP {response.status_code} -- check the API key"
+                    f"{self._name}: HTTP {response.status_code} -- check the API key",
+                    status=response.status_code, code=_refusal_code(response),
                 )
             # v1 never inspected status codes at all: a 429 body became a
             # KeyError that aborted the whole run.
@@ -189,6 +190,16 @@ def _observe_rate_limit(
         limiter.observe_limit(float(raw), window)
     except ValueError:
         log.debug("unreadable X-RateLimit-Limit: %r", raw)
+
+
+def _refusal_code(response: httpx.Response) -> str | None:
+    """The code a refusal names itself by, ``{"error": "unauthorized", …}``, if any."""
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    code = body.get("error") if isinstance(body, dict) else None
+    return code if isinstance(code, str) else None
 
 
 def _parse_retry_after(response: httpx.Response) -> float | None:

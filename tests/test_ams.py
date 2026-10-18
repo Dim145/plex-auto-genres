@@ -22,7 +22,7 @@ from plex_auto_genres.errors import (
 from plex_auto_genres.models import ExternalId, MediaType
 from plex_auto_genres.plexsvc.client import parse_guid
 from plex_auto_genres.providers import bindable_schemes, build_providers
-from plex_auto_genres.providers.ams import REFUSED, AmsProvider, manifest_problem
+from plex_auto_genres.providers.ams import AmsProvider, manifest_problem, split_address
 from plex_auto_genres.providers.base import HttpTransport, LookupRequest
 from plex_auto_genres.ratelimit import LimitSpec
 from plex_auto_genres.server import create_app
@@ -333,12 +333,92 @@ async def test_the_catalogues_genres_are_kept_as_it_names_them():
 
 
 @respx.mock
-async def test_a_refused_address_says_how_to_let_this_app_in():
-    respx.get(f"{PROVIDER}/library/metadata/movie-tmdb-603").mock(return_value=httpx.Response(403))
+@pytest.mark.parametrize(("status", "code", "key", "said"), [
+    # By address, the server's default: this app's is not on its list.
+    (403, "forbidden", None, ["refused this app's address", "Allowed addresses",
+                              "ARR_METADATA_API_KEY"]),
+    # Asked for a key, and given none, or one it does not know.
+    (401, "unauthorized", None, ["asks this app for a key", "ARR_METADATA_API_KEY"]),
+    (401, "unauthorized", "ams_k3y", ["does not know the key", "from ARR_METADATA_API_KEY"]),
+    # A key switched off or run out -- or an address list that reads no key.
+    (403, "forbidden", "ams_k3y", ["switched off or have run out", "Allowed addresses"]),
+    (403, "owner_inactive", "ams_k3y", ["account it belongs to", "not active"]),
+    # Not the server's: something in front of it, a proxy and its password.
+    (401, None, None, ["not as arr-metadata-server refuses", "user and password"]),
+    (403, None, "ams_k3y", ["not as arr-metadata-server refuses"]),
+])
+async def test_a_refusal_says_what_lets_this_app_in(status, code, key, said):
+    respx.get(f"{PROVIDER}/library/metadata/movie-tmdb-603").mock(return_value=(
+        httpx.Response(status, json={"error": code, "message": "no"}) if code
+        else httpx.Response(status, text="<html>Unauthorized</html>")
+    ))
     with pytest.raises(ProviderAuthError) as refused:
-        await ams().fetch_by_id(ExternalId("tmdb", "603"), LookupRequest("x", None, MOVIE))
-    assert str(refused.value) == REFUSED
-    assert "Allowed addresses" in REFUSED and "ARR_METADATA_API_KEY" in REFUSED
+        await ams(api_key=key).fetch_by_id(
+            ExternalId("tmdb", "603"), LookupRequest("x", None, MOVIE)
+        )
+    assert all(words in str(refused.value) for words in said), str(refused.value)
+    assert (refused.value.status, refused.value.code) == (status, code)
+    assert "ams_k3y" not in str(refused.value)
+
+
+@respx.mock
+async def test_a_key_in_the_address_travels_in_a_header_and_is_never_quoted():
+    # The address the server's Plex panel gives carries a key (0.8.1). Kept in
+    # the path, it would be in every address this app quotes.
+    route = respx.get(f"{PROVIDER}/library/metadata/movie-tmdb-603").mock(
+        return_value=httpx.Response(404)
+    )
+    provider = ams(address=f"{SERVER}/plex/ams_k3y")
+
+    with pytest.raises(ProviderNotFound) as missing:
+        await provider.fetch_by_id(ExternalId("tmdb", "603"), LookupRequest("x", None, MOVIE))
+
+    sent = route.calls.last.request
+    assert sent.headers["X-Api-Key"] == "ams_k3y" and "ams_k3y" not in str(sent.url)
+    assert "ams_k3y" not in str(missing.value)
+
+
+@respx.mock
+async def test_a_refused_key_is_named_by_the_setting_it_came_from():
+    # Told to set ARR_METADATA_API_KEY for a key the address carries, the
+    # person was then refused for giving two keys.
+    respx.get(f"{PROVIDER}/library/metadata/movie-tmdb-603").mock(
+        return_value=httpx.Response(401, json={"error": "unauthorized", "message": "no"})
+    )
+    with pytest.raises(ProviderAuthError) as refused:
+        await ams(address=f"{SERVER}/plex/ams_k3y").fetch_by_id(
+            ExternalId("tmdb", "603"), LookupRequest("x", None, MOVIE)
+        )
+    assert "from ARR_METADATA_URL" in str(refused.value)
+    assert "ARR_METADATA_API_KEY" not in str(refused.value)
+
+
+@pytest.mark.parametrize(("given", "server", "key"), [
+    ("http://ams.test:8080/plex/ams_k3y", "http://ams.test:8080", "ams_k3y"),
+    ("http://ams.test/sub/plex/ams_k3y/", "http://ams.test/sub", "ams_k3y"),
+    ("http://u:p@ams.test/plex/ams_k%2B3y", "http://ams.test", "ams_k+3y"),
+    ("http://ams.test:8080", "http://ams.test:8080", None),
+    ("http://ams.test/sub", "http://ams.test/sub", None),
+    ("http://ams.test/plex/AMS_K3y", "http://ams.test", "AMS_K3y"),
+    # Every key the server issues begins with ams_: a path it is reached
+    # under, behind a proxy, is not one.
+    ("http://nas.test/plex/ams", "http://nas.test/plex/ams", None),
+    ("http://nas.test/apps/plex/plex/ams_k3y", "http://nas.test/apps/plex", "ams_k3y"),
+])
+def test_the_key_an_address_carries_is_taken_out_of_it(given, server, key):
+    address = split_address(given)
+    assert (address.server, address.key) == (server, key)
+
+
+def test_two_keys_for_one_server_are_refused_and_one_twice_is_not():
+    with pytest.raises(ConfigError, match="ARR_METADATA_API_KEY another") as refused:
+        build_providers(("ams",), MOVIE, ProviderSettings(
+            ams_url=f"{SERVER}/plex/ams_one", ams_api_key="ams_two",
+        ))
+    assert "ams_one" not in str(refused.value) and "ams_two" not in str(refused.value)
+    build_providers(("ams",), MOVIE, ProviderSettings(
+        ams_url=f"{SERVER}/plex/ams_one", ams_api_key="ams_one",
+    ))
 
 
 @respx.mock
@@ -502,6 +582,14 @@ def test_an_address_is_shown_without_its_credentials():
     assert shown_address("http://u:pa/ss@ams.test:8080") == "http://ams.test:8080"
     assert shown_address("http://u:pa#ss@ams.test") == "http://ams.test"
     assert shown_address(None) is None
+    # Nor the key the address the server's Plex panel gives ends with.
+    assert shown_address("http://u:p@ams.test:8080/plex/ams_k3y") == "http://ams.test:8080/plex/***"
+    assert shown_address("http://ams.test/plex/ams_k3y/") == "http://ams.test/plex/***/"
+    assert shown_address("http://ams.test/plex/library/x") == "http://ams.test/plex/library/x"
+    assert shown_address("http://nas.test/apps/plex/plex/ams_k3y") == "http://nas.test/apps/plex/plex/***"
+    assert shown_address("http://nas.test/plex/ams") == "http://nas.test/plex/ams", "not a key"
+    assert shown_address("http://ams.test/plex?x=1&APIKEY=ams_k3y") == "http://ams.test/plex?x=1&APIKEY=***"
+    assert shown_address("http://ams.test/plex?api_key=ams_k3y#a") == "http://ams.test/plex?api_key=***#a"
 
 
 # -- pins from the console and the command line ---------------------------------
@@ -601,6 +689,14 @@ def _doctor(tmp_path, monkeypatch, url: str | None, *, online: bool = False):
     return next(c for c in report.checks if c.id == "ams")
 
 
+def test_the_doctor_shows_an_address_without_the_key_it_carries(tmp_path, monkeypatch):
+    check = _doctor(tmp_path, monkeypatch, f"{SERVER}/plex/ams_k3y")
+    assert check.level == "ok" and "/plex/***" in check.detail and "ams_k3y" not in check.detail
+    monkeypatch.setenv("ARR_METADATA_API_KEY", "ams_other")
+    check = _doctor(tmp_path, monkeypatch, f"{SERVER}/plex/ams_k3y")
+    assert (check.level, check.title) == ("error", "ARR_METADATA_API_KEY cannot be used")
+
+
 def test_the_doctor_wants_the_address_when_a_library_reads_from_ams(tmp_path, monkeypatch):
     check = _doctor(tmp_path, monkeypatch, None)
     assert check.level == "error" and "ARR_METADATA_URL" in check.title
@@ -627,7 +723,9 @@ def test_online_the_doctor_asks_the_providers_manifest(tmp_path, monkeypatch):
 
 @respx.mock
 @pytest.mark.parametrize(("response", "said"), [
-    (httpx.Response(403), "Allowed addresses"),
+    (httpx.Response(403, json={"error": "forbidden", "message": "no"}), "Allowed addresses"),
+    (httpx.Response(401, json={"error": "unauthorized"}), "asks this app for a key"),
+    (httpx.Response(401, text="Unauthorized"), "not as arr-metadata-server refuses"),
     (httpx.Response(503, json={"error": "surface_disabled", "message": "off"}), "switched off"),
     (httpx.Response(503, text="bad gateway"), "answered HTTP 503"),
     (httpx.Response(421, text="unknown host"), "AMS_ALLOWED_HOSTS"),
@@ -637,6 +735,16 @@ def test_online_the_doctor_asks_the_providers_manifest(tmp_path, monkeypatch):
 def test_the_manifest_tells_apart_why_the_server_cannot_be_asked(response, said):
     respx.get(PROVIDER).mock(return_value=response)
     assert said in (manifest_problem(SERVER, None) or "")
+
+
+@respx.mock
+def test_the_manifest_is_asked_with_the_key_the_address_carries():
+    route = respx.get(PROVIDER).mock(
+        return_value=httpx.Response(401, json={"error": "unauthorized"})
+    )
+    said = manifest_problem(f"{SERVER}/plex/ams_k3y", None) or ""
+    assert route.calls.last.request.headers["X-Api-Key"] == "ams_k3y"
+    assert "does not know the key" in said and "ams_k3y" not in said
 
 
 @respx.mock

@@ -20,7 +20,7 @@ from .config import (
 )
 from .errors import ConfigError
 from .models import MediaType, guid_key
-from .providers.ams import key_headers, manifest_problem, split_address
+from .providers.ams import issued_key, key_headers, manifest_problem, split_address
 from .store import Store
 from .taxonomy import check_names, fetch_live_genres
 
@@ -186,11 +186,11 @@ def _ams_check(config: AppConfig, *, online: bool) -> Check:
         )
     shown = shown_address(url)
     try:
-        split_address(url)
+        address = split_address(url)
     except ConfigError as exc:
         return Check("ams", "error", "ARR_METADATA_URL cannot be used", str(exc))
     try:
-        key_headers(config.providers.ams_api_key)
+        key_headers(issued_key(address, config.providers.ams_api_key).value)
     except ConfigError as exc:
         return Check("ams", "error", "ARR_METADATA_API_KEY cannot be used", str(exc))
     if not online:

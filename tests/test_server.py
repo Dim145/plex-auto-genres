@@ -112,6 +112,16 @@ def test_the_arr_metadata_server_is_shown_without_its_credentials(client, config
     text = json.dumps(body)
     assert "hunter2" not in text and "someone" not in text and "ams_not_for_the_page" not in text
 
+    # The address the server's Plex panel gives carries a key at its end.
+    monkeypatch.setenv("ARR_METADATA_URL", "http://ams.local:8080/plex/ams_in_the_address")
+    time.sleep(0.02)
+    config_file.write_text(config_file.read_text() + "\n")
+
+    body = client.get("/api/v1/config").json()
+
+    assert body["secrets"]["ams_url"] == "http://ams.local:8080/plex/***"
+    assert "ams_in_the_address" not in json.dumps(body)
+
 
 def test_config_uses_the_file_s_own_key_names(client):
     """Aliases, so the UI shows what the user wrote (useGenres, not use_genres)."""

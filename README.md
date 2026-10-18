@@ -408,20 +408,27 @@ no year, is left to the next source, or to a binding.
    reverse proxy, which the server's own guide keeps `/plex` off. Two containers on one
    Docker network reach it by name, `http://arr-metadata-server:8080`; otherwise use the
    host's address and the published port. The address its **Keys & network** page gives
-   Plex, ending in `/plex`, works too. A user and password in it are sent as basic auth,
-   and never shown.
-2. **Let this app in.** The provider admits callers by address (`AMS_PLEX_AUTH=allowlist`,
-   its default): add the address the server sees this app call from under **Keys &
-   network › Allowed addresses**, beside Plex's — this container's on a shared network, or
-   the Docker host's through a published port. That list also opens Sonarr's and Radarr's
-   routes, and a whole network on it lets in everything that can reach them: allow the one
-   address. A refused call is listed under **Who has been calling**, with a button that
-   allows it. A server that asks for a key instead (`AMS_PLEX_AUTH=apikey`) takes one issued
-   there in `ARR_METADATA_API_KEY`.
+   Plex, ending in `/plex` or `/plex/<key>`, works too. A user and password in it are sent
+   as basic auth, a key in a header, and neither is ever shown.
+2. **Let this app in.** The provider admits callers one of two ways, as the server's
+   `AMS_PLEX_AUTH` says:
+   - **by address** (`allowlist`, its default): add the address the server sees this app
+     call from under **Keys & network › Allowed addresses**, beside Plex's — this
+     container's on a shared network, or the Docker host's through a published port. That
+     list also opens Sonarr's and Radarr's routes, and a whole network on it lets in
+     everything that can reach them: allow the one address. A refused call is listed under
+     **Who has been calling**, with a button that allows it.
+   - **by key** (`apikey`, which Plex can follow from arr-metadata-server 0.8.1 on, a key
+     in the address it is given): issue this app a key of its own that only reads, under
+     **Keys & network**, and set it as `ARR_METADATA_API_KEY`. It travels in a header,
+     never in an address. The address of the **Plex** panel, `…/plex/<key>`, works as
+     `ARR_METADATA_URL` as well, but the server's guide keeps that key for Plex alone:
+     revoking it would shut both out. A key carries its own settings there, the language
+     the genres are named in among them.
 3. **Check it** from the console: **Config › Checks** asks the provider's manifest and says
-   what is still in the way — an address it refuses, a name it does not answer to
-   (`AMS_ALLOWED_HOSTS`), a provider switched off, a redirect, a server that is not
-   arr-metadata-server. The container's own start-up check runs offline and only sees that
+   what is still in the way — an address it refuses, a key it asks for or does not take, a
+   name it does not answer to (`AMS_ALLOWED_HOSTS`), a provider switched off, a redirect, a
+   server that is not arr-metadata-server. The container's own start-up check runs offline and only sees that
    the address is set; `docker exec <container> plex-auto-genres doctor` asks from where
    the app runs.
 
@@ -436,8 +443,10 @@ catalogue after a title was tagged — or a title another source answered while 
 refused — reaches Plex once the title is asked again: **Forget** it in the library browser,
 or run the library with `--force`.
 
-The genres are named as the catalogue keeps them, in its language: a `replace` rule bridges
-a French catalogue and English-only sources, as below. It has no keywords, so `useKeywords`
+The genres are named as the catalogue keeps them, in the language the server answers this
+app in — the one set there for its key, or for its address when it lets callers in by
+address, else its own: a `replace` rule bridges a French catalogue and English-only
+sources, as below. It has no keywords, so `useKeywords`
 reads TMDB's or AniList's. A run asks it 240 times a minute at most, under half the 600 the
 server allows an address by default — a budget Plex and the arr apps share when they call
 from the same address.
@@ -466,7 +475,7 @@ agree with MyAnimeList and AniList, which are English-only.
 | `PLEX_COLLECTION_PREFIX` | Prepended to every tag this tool writes |
 | `TMDB_API_KEY` | Required by a library reading from `tmdb`, the default for `standard-tv` / `standard-movie` |
 | `ARR_METADATA_URL` | The arr-metadata-server a library reading from `ams` asks |
-| `ARR_METADATA_API_KEY` | A key issued by that server, only if its Plex provider asks for one |
+| `ARR_METADATA_API_KEY` | A key that server issued this app, when its Plex provider asks for keys (`AMS_PLEX_AUTH=apikey`) |
 | `PAG_CONCURRENCY` | Parallel provider lookups (default 4) |
 | `CRON_SCHEDULE`, `RUN_ON_START`, `TZ` | Container scheduling |
 

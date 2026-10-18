@@ -10,9 +10,11 @@ the catalogue's, locks and all -- where the TMDB relay the server also runs
 keeps only the locked genres TMDB has a name for.
 
 That provider lets callers in by address (``AMS_PLEX_AUTH=allowlist``, its
-default): this app's address goes on the server's list of allowed addresses,
-beside Plex's. A key issued there is sent as well, for a server set to ask for
-one instead.
+default) -- this app's goes on the server's list of allowed addresses, beside
+Plex's -- or, set to ``apikey``, by a key issued there. Plex itself carries its
+key in the address it is given, ``…/plex/<key>`` (arr-metadata-server 0.8.1);
+this app takes a key from there or from ``ARR_METADATA_API_KEY``, and sends it
+in a header, so that no address it quotes holds it.
 
 Asking for a work by its key fetches it into the catalogue and keeps it there,
 as when Plex asks; so a title search only goes that far for a work whose title
@@ -23,7 +25,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 import httpx
@@ -57,12 +59,56 @@ _PAGES = {
     "imdb": "https://www.imdb.com/title/{value}/",
 }
 
-REFUSED = (
-    "arr-metadata-server refused this app. Its Plex provider lets callers in by "
-    "address: allow this app's under Keys & network > Allowed addresses, beside "
-    "Plex's. If it asks for a key instead (AMS_PLEX_AUTH=apikey), set "
-    "ARR_METADATA_API_KEY to one issued there."
-)
+
+def refusal(status: int | None, code: str | None, *, key_from: str | None) -> str:
+    """Why the server refused this app, and what lets it in.
+
+    Its Plex provider lets callers in by address (``AMS_PLEX_AUTH=allowlist``,
+    the default) or by a key issued there (``apikey``). A 401 is a key missing,
+    or one it does not know; a 403 an address it does not allow, or a key
+    switched off or run out -- told apart only by whether a key was given.
+    ``key_from`` names the setting the key came from, when one did.
+    """
+    if code is None:
+        # The server names every refusal, {"error": "unauthorized", …}: one
+        # without a name came from whatever stands in front of it.
+        return (
+            f"The address in ARR_METADATA_URL answered HTTP {status}, and not as "
+            "arr-metadata-server refuses: whatever stands in front of it -- a reverse "
+            "proxy, the user and password it asks for -- refused this app. Check the "
+            "address, and the user and password written into it."
+        )
+    if code == "owner_inactive" and key_from:
+        return (
+            f"arr-metadata-server refused the key this app gives it, from {key_from}: the "
+            "account it belongs to there is not active. Issue this app a key of its own, "
+            f"one that only reads, under Keys & network, and put it in {key_from}."
+        )
+    if status == 401:
+        if key_from:
+            return (
+                "arr-metadata-server does not know the key this app gives it, from "
+                f"{key_from}: copy it again, or issue another that only reads under Keys & "
+                "network, and put it there."
+            )
+        return (
+            "arr-metadata-server asks this app for a key (AMS_PLEX_AUTH=apikey): issue it "
+            "one that only reads under Keys & network, and set it as ARR_METADATA_API_KEY."
+        )
+    if key_from:
+        return (
+            f"arr-metadata-server refused this app. The key it gives, from {key_from}, may "
+            "be switched off or have run out -- issue another under Keys & network -- or "
+            "the server lets callers in by address (AMS_PLEX_AUTH=allowlist), reading no "
+            "key, and this app's is not allowed: allow it under Keys & network > Allowed "
+            "addresses, beside Plex's."
+        )
+    return (
+        "arr-metadata-server refused this app's address. Its Plex provider lets callers "
+        "in by address: allow this app's under Keys & network > Allowed addresses, beside "
+        "Plex's -- or have it ask for keys (AMS_PLEX_AUTH=apikey), and give this app one "
+        "that only reads in ARR_METADATA_API_KEY."
+    )
 
 
 class AmsProvider(Provider):
@@ -75,10 +121,12 @@ class AmsProvider(Provider):
 
     def __init__(self, transport, base_url: str, api_key: str | None = None) -> None:
         super().__init__(transport)
-        server, self._auth = split_address(base_url)
-        self._server = server
-        self._provider = f"{server}/plex"
-        self._headers = key_headers(api_key)
+        address = split_address(base_url)
+        key = issued_key(address, api_key)
+        self._server, self._auth = address.server, address.auth
+        self._provider = f"{address.server}/plex"
+        self._headers = key_headers(key.value)
+        self._key_from = key.source
 
     @classmethod
     def schemes_for(cls, media_type: MediaType) -> tuple[str, ...]:
@@ -169,7 +217,10 @@ class AmsProvider(Provider):
                 follow_redirects=False, **kwargs,
             )
         except ProviderAuthError as exc:
-            raise ProviderAuthError(REFUSED) from exc
+            raise ProviderAuthError(
+                refusal(exc.status, exc.code, key_from=self._key_from),
+                status=exc.status, code=exc.code,
+            ) from exc
         if response.is_redirect:
             raise ProviderError(
                 f"ams: {self._server} redirects to {_location(response)}; set "
@@ -204,12 +255,28 @@ def _kind(request: LookupRequest) -> str:
     return "movie" if request.is_film else "show"
 
 
-def split_address(raw: str) -> tuple[str, httpx.BasicAuth | None]:
+#: What every key the server issues begins with, whatever its case: what tells
+#: a key at the end of an address from a path the server is reached under.
+KEY_PREFIX = "ams_"
+
+
+class Address(NamedTuple):
+    """Where the server is, with no credential in it, and the credentials apart."""
+
+    server: str
+    auth: httpx.BasicAuth | None = None
+    #: The key the address carried: ``…/plex/<key>``, the address the server's
+    #: Plex panel gives (arr-metadata-server 0.8.1).
+    key: str | None = None
+
+
+def split_address(raw: str) -> Address:
     """The server's address without credentials, and the credentials apart.
 
     A user and password written into ``ARR_METADATA_URL`` -- for a proxy in
-    front of the server -- travel as basic auth, and so never reach a message,
-    a log line or a title's recorded error, which all quote the address.
+    front of the server -- travel as basic auth, and a key at the end of it,
+    ``…/plex/<key>``, in a header: neither reaches a message, a log line or a
+    title's recorded error, which all quote the address.
 
     Whatever cannot be used is refused here, as a :class:`ConfigError`: a
     host or a port a parser chokes on would otherwise escape mid-run, or from
@@ -237,7 +304,11 @@ def split_address(raw: str) -> tuple[str, httpx.BasicAuth | None]:
         named, _ = parts.hostname, parts.port
     except ValueError:
         raise ConfigError(_UNUSABLE) from None
-    server = urlunsplit(parts._replace(netloc=host))
+    path, key = parts.path, None
+    head, keyed, segment = path.rpartition("/plex/")
+    if keyed and "/" not in segment and unquote(segment)[:len(KEY_PREFIX)].lower() == KEY_PREFIX:
+        path, key = head, unquote(segment)
+    server = urlunsplit(parts._replace(netloc=host, path=path))
     try:
         httpx.URL(server)
     except (ValueError, httpx.InvalidURL):
@@ -246,9 +317,9 @@ def split_address(raw: str) -> tuple[str, httpx.BasicAuth | None]:
     if not named or any(ch.isspace() for ch in named) or parts.query or parts.fragment:
         raise ConfigError(_UNUSABLE)
     if not sep:
-        return server, None
+        return Address(server, None, key)
     user, _, password = userinfo.partition(":")
-    return server, httpx.BasicAuth(unquote(user), unquote(password))
+    return Address(server, httpx.BasicAuth(unquote(user), unquote(password)), key)
 
 
 _UNUSABLE = (
@@ -257,19 +328,43 @@ _UNUSABLE = (
 )
 
 
+class Issued(NamedTuple):
+    """The key this app gives the server, and the setting it came from."""
+
+    value: str | None = None
+    source: str | None = None
+
+
+def issued_key(address: Address, api_key: str | None) -> Issued:
+    """The key this app gives the server: ``ARR_METADATA_API_KEY``, or its address's."""
+    if address.key and api_key and address.key != api_key:
+        raise ConfigError(
+            "ARR_METADATA_URL carries one key and ARR_METADATA_API_KEY another: keep one "
+            "of them."
+        )
+    if api_key:
+        return Issued(api_key, "ARR_METADATA_API_KEY")
+    if address.key:
+        return Issued(address.key, "ARR_METADATA_URL")
+    return Issued()
+
+
 def key_headers(api_key: str | None) -> dict[str, str]:
     """The header carrying a key issued by the server, when there is one.
 
-    A key no header can carry is refused here, without quoting it: the HTTP
-    library's own complaint quotes it whole, and would carry it into every
-    title's recorded error and the doctor's report.
+    The server takes it there as it takes it from Plex's address. A key no
+    header can carry is refused here, without quoting it: the HTTP library's
+    own complaint quotes it whole, and would carry it into every title's
+    recorded error and the doctor's report.
     """
     if not api_key:
         return {}
     if not all(ch.isascii() and ch.isprintable() and not ch.isspace() for ch in api_key):
         raise ConfigError(
-            "ARR_METADATA_API_KEY holds a space, an accent or a control character, which "
-            "no key the server issues does: copy it again from its Keys & network page."
+            "The key this app gives arr-metadata-server -- ARR_METADATA_API_KEY, or the "
+            "one at the end of ARR_METADATA_URL -- holds a space, an accent or a control "
+            "character, which no key it issues does: copy it again from its Keys & network "
+            "page."
         )
     return {"X-Api-Key": api_key}
 
@@ -397,13 +492,15 @@ def manifest_problem(base_url: str, api_key: str | None, *, timeout: float = 5.0
     not one are told apart before a run finds out title by title.
     """
     try:
-        server, auth = split_address(base_url)
-        headers = key_headers(api_key)
+        address = split_address(base_url)
+        key = issued_key(address, api_key)
+        headers = key_headers(key.value)
     except ConfigError as exc:
         return str(exc)
+    server = address.server
     url = f"{server}/plex"
     try:
-        response = httpx.get(url, timeout=timeout, auth=auth, headers=headers)
+        response = httpx.get(url, timeout=timeout, auth=address.auth, headers=headers)
     except (httpx.HTTPError, httpx.InvalidURL) as exc:
         return f"{url} cannot be reached: {exc}"
     if response.is_redirect:
@@ -412,7 +509,7 @@ def manifest_problem(base_url: str, api_key: str | None, *, timeout: float = 5.0
             "address it redirects to: a redirected search would not reach the provider."
         )
     if response.status_code in (401, 403):
-        return REFUSED
+        return refusal(response.status_code, _code_of(response), key_from=key.source)
     if response.status_code == 421:
         return (
             f"The server does not answer to the name in {server}: it lists the names "

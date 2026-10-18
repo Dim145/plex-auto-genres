@@ -22,6 +22,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
 from collections.abc import Iterable
@@ -361,7 +362,9 @@ class ProviderSettings(BaseModel):
 
 
 def shown_address(url: str | None) -> str | None:
-    """An address as it may be shown or logged: without a user and password in it.
+    """An address as it may be shown or logged: without a user and password in
+    it, nor a key -- the one the server's Plex panel puts at its end,
+    ``/plex/<key>``, or one in its query, which the server reads too.
 
     Everything before the last ``@`` goes, however the rest is formed: a
     password holding a stray ``/`` or ``#`` is still never printed. An ``@``
@@ -370,9 +373,14 @@ def shown_address(url: str | None) -> str | None:
     if not url:
         return None
     scheme, sep, rest = url.partition("://")
-    if not sep:
-        return url.rpartition("@")[2]
-    return f"{scheme}{sep}{rest.rpartition('@')[2]}"
+    shown = f"{scheme}{sep}{rest.rpartition('@')[2]}" if sep else url.rpartition("@")[2]
+    return _KEY_IN_QUERY.sub(r"\1***", _KEY_IN_PATH.sub("***", shown))
+
+
+#: A key an address of the server carries: every one it issues begins with
+#: ``ams_``, so a path it is reached under is never taken for one.
+_KEY_IN_PATH = re.compile(r"(?<=/plex/)(?i:ams_)[^/?#]*")
+_KEY_IN_QUERY = re.compile(r"(?<=[?&])((?i:api_?key)=)[^&#]*")
 
 
 class ScheduleSettings(BaseModel):

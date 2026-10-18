@@ -14,7 +14,7 @@ from ..config import ProviderSettings
 from ..errors import ConfigError, ProviderAuthError
 from ..models import MediaType
 from ..ratelimit import AMS_LIMITS, ANILIST_LIMITS, JIKAN_LIMITS, TMDB_LIMITS, shared_limiter
-from .ams import AmsProvider, key_headers, split_address
+from .ams import AmsProvider, issued_key, key_headers, split_address
 from .anidb_map import AniDbMapper
 from .anilist import AniListProvider
 from .base import HttpTransport, LookupRequest, Provider, USER_AGENT
@@ -219,8 +219,8 @@ def build_providers(
                     "the address of the arr-metadata-server to ask."
                 )
             # Refuses an address, or a key, it could not use.
-            split_address(settings.ams_url)
-            key_headers(settings.ams_api_key)
+            address = split_address(settings.ams_url)
+            key_headers(issued_key(address, settings.ams_api_key).value)
 
     client = httpx.AsyncClient(
         timeout=httpx.Timeout(20.0, connect=10.0),

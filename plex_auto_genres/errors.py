@@ -24,6 +24,15 @@ class ProviderAuthError(ProviderError):
 
     retryable = False
 
+    def __init__(
+        self, message: str, *, status: int | None = None, code: str | None = None
+    ) -> None:
+        super().__init__(message)
+        #: The HTTP status the refusal came with, and the code the provider
+        #: gave it when it gave one: what tells one reason from another.
+        self.status = status
+        self.code = code
+
 
 class ProviderRateLimited(ProviderError):
     """The provider asked us to slow down."""

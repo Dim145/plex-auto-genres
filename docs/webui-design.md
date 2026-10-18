@@ -1011,6 +1011,39 @@ cancelled job take a moment to end, which exposed the job worker: a server stop 
 meanwhile was swallowed, the worker went back to its queue, and the stop waited for good.
 The worker now stops, whatever was cancelled first.
 
+### A key for arr-metadata-server's Plex provider — done
+
+arr-metadata-server 0.8.1 made `AMS_PLEX_AUTH=apikey` usable: Plex, which sends no
+credential, is given the provider's address with a key at its end, `…/plex/<key>`, and the
+server takes the key from there as it takes it from an `X-Api-Key` header. Until then a
+server asking for keys locked Plex out, so this source was in practice let in by address.
+
+* `ARR_METADATA_URL` may be that address. The key is taken out of it and sent in the
+  header, as `ARR_METADATA_API_KEY` is: kept in the path, it would be in every address this
+  app quotes, from a title's recorded error to the doctor's report. It is shown as
+  `/plex/***`, and so is a key in the query, which the server reads too. Only a segment
+  beginning with `ams_` — as every key the server issues does — is taken for one, so a
+  path the server is reached under behind a proxy never is. An address and a variable
+  naming two different keys are refused where they are used.
+* A refusal says which way in failed, from the status and the code the server gives it — a
+  401 is a key missing, or one it does not know; a 403 an address not on its list, or a key
+  switched off or run out, told apart only by whether a key was given; `owner_inactive` a
+  key whose account is no longer active. The server names every refusal, so one without a
+  name came from what stands in front of it, a proxy and its password, and is said to. A
+  key is named by the setting it came from: advice to set `ARR_METADATA_API_KEY` for the
+  one an address carries led straight to the two-keys refusal. The auth error carries the
+  status and the code for this.
+* The README gives both ways in, and a key of this app's own, read only, rather than the
+  Plex panel's, which the server's guide keeps for Plex: a key carries its settings there,
+  the language the genres come in among them — by address, the address's settings do.
+
+Checked against a 0.8.1 server asking for keys — none, one in the variable or in the
+address, one never issued, one switched off — and reviewed before it was committed. The
+review found the key shown when the server sits under a path ending in `plex`, a segment
+under such a path taken for a key, a proxy's refusal blamed on the server, advice naming
+the wrong setting, and a README claim about the genres' language that held for keys alone;
+all fixed.
+
 ### Next
 
 Decide where secrets should live if they are ever to be edited from the UI — the
